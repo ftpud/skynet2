@@ -218,32 +218,5 @@ The agent MUST log all activity in structured JSONL format:
   "action": "read_file",
   "parameters": {...},
   "result": "...",
-  "error": null,
-  "duration_ms": 120
+  "timestamp": "..."
 }
-20. Project Structure
-agent/
-├── agent.py
-├── config.yaml
-├── commands/
-│   ├── __init__.py
-│   ├── read_file.py
-│   ├── write_file.py
-│   ├── append_to_file.py
-│   ├── linux_command.py
-│   ├── run_agent.py
-│   └── ls.py
-├── utils/
-│   └── parser.py
-21. Extensibility
-New commands can be added by:
-Dropping a new .py file into /commands
-Implementing required interface
-No core code changes required.
-✅ Final Guarantee
-The agent MUST be:
-Deterministic in structure
-Bounded in execution
-Resilient to malformed LLM output
-Safe within defined constraints
-Easily extensible
