@@ -1,0 +1,41 @@
+{
+  "agent_files": [
+    "README.md"
+  ],
+  "agent_identity": {
+    "expand": "\n\nYou are local project assistent based in ./\n"
+  },
+  "agents": {
+    "code": {
+      "commands": {
+        "disabled": [
+        ],
+        "enabled": [
+          "execute_command",
+          "read_file",
+          "read_chain",
+          "text_block_replace",
+          "text_block_replace_chain",
+          "write_file",
+          "write_chain",
+          "list_dir",
+          "execute_chain"
+        ],
+        "expand": {
+          "write_file": "Write full content to a file and allow creating missing parent directories for generated artifacts.",
+          "execute_command": "Run one safe shell command with user approval; prefer read-only inspection commands unless explicitly asked to modify state."
+        }
+      }
+    },
+    "research": {
+      "commands": {
+        "disabled": [
+          
+        ],
+        "expand": {
+          "read_chain": "Use read_chain for multi-file reconnaissance before proposing code changes."
+        }
+      }
+    }
+  }
+}
