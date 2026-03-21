@@ -31,6 +31,14 @@ MAX_AGENT_DEPTH = 3
 MAX_CHILD_AGENTS = 5
 CHILD_AGENT_TIMEOUT = 600      # seconds
 
+# ── Observation truncation ───────────────────────────────────────────────────
+# Large command outputs are trimmed before being stored in history so they are
+# not re-sent verbatim on every subsequent step (biggest single token saving).
+# The full output is still shown in verbose mode and written to the log.
+OBS_HISTORY_LIMIT = 800        # chars — store full text only when below this
+OBS_SUMMARY_HEAD  = 300        # chars kept from the START of a large obs
+OBS_SUMMARY_TAIL  = 200        # chars kept from the END   of a large obs
+
 
 class Agent:
     def __init__(self, config: dict, model: str, depth: int, agent_name: str, verbose: bool = False, log_path: str | None = None, provider: str = "openai"):
@@ -533,8 +541,8 @@ SAFETY:
 
         # Retry with expanding max_tokens window on truncation
         claude_max_tokens = max_tokens
-        MAX_CLAUDE_TOKENS = 8192
-        INITIAL_CLAUDE_TOKENS = min(512, claude_max_tokens)
+        MAX_CLAUDE_TOKENS = max_tokens
+        INITIAL_CLAUDE_TOKENS = min(10000, claude_max_tokens)
         claude_max_tokens = INITIAL_CLAUDE_TOKENS
         claude_attempt = 0
         MAX_CLAUDE_RETRIES = 4
@@ -592,7 +600,7 @@ SAFETY:
 
             # If truncated, expand the token window and retry
             if stop_reason == "max_tokens" and claude_max_tokens < MAX_CLAUDE_TOKENS:
-                new_limit = min(claude_max_tokens * 2, MAX_CLAUDE_TOKENS)
+                new_limit = min(claude_max_tokens * 4, MAX_CLAUDE_TOKENS)
                 if self.verbose:
                     print(f"   [claude] truncated at {claude_max_tokens} tokens → retrying with {new_limit}")
                 claude_max_tokens = new_limit
@@ -730,8 +738,17 @@ SAFETY:
 
                 obs = obs[:self.max_output_chars] + "…" if len(obs) > self.max_output_chars else obs
 
+                if len(obs) <= OBS_HISTORY_LIMIT:
+                    obs_for_history = obs
+                else:
+                    obs_for_history = (
+                        obs[:OBS_SUMMARY_HEAD]
+                        + f"\n…[truncated, {len(obs)} chars total, showing head+tail]…\n"
+                        + obs[-OBS_SUMMARY_TAIL:]
+                    )
+
                 self.history.append({"role": "assistant", "content": json.dumps(parsed)})
-                self.history.append({"role": "user", "content": f"Observation: {obs}"})
+                self.history.append({"role": "user", "content": f"Observation: {obs_for_history}"})
 
                 # <<< NEW: skip _log for run_agent (already logged above) >>>
                 if name != "run_agent":

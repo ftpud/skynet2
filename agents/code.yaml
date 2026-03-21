@@ -5,18 +5,16 @@ temperature: 0.2
 max_tokens: 400000
 
 permissions:
+  - multiple_file_read
   - replace_in_file
-  - text_block_replace
-  - read_file
-  - write_file
+  - replace_in_multiple_files
   - ls
+  - multiple_linux_commands
   - linux_command
   - append_to_file
   - run_agent
-  - multiple_file_read
+  - read_file
 
-allowed_agents:
-  - plan
 
 base_system_prompt: "You are coding specialis focused on writing code and fix files using commands. Do not ask user for confirmations or clarifications. For complex tasks consider to use agents. \nCritical: Always do changes yourself, never ask user to do code changes."
 
