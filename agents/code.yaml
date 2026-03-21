@@ -1,4 +1,4 @@
-role: "Coding specialist (fast)"
+role: "Coding specialist"
 model: "gpt-5.3-codex"
 temperature: 0.2
 max_tokens: 40960
@@ -17,7 +17,7 @@ allowed_agents:
   - plan
   - review
 
-base_system_prompt: ""
+base_system_prompt: "You are coding specialis focused on writing code and fix files using commands. Do not ask user for confirmations."
 
 limits:
   max_steps: 30

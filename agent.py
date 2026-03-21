@@ -290,8 +290,8 @@ SAFETY:
             "--prompt", child_prompt,
             "--depth", str(self.depth + 1),
         ]
-        if self.model:
-            cmd += ["--model", self.model]
+        #if self.model:
+        #    cmd += ["--model", self.model]
         if self.verbose:
             cmd += ["--verbose"]
 
