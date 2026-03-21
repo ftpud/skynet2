@@ -168,6 +168,9 @@ def load_data(log_dir: Path, now_local: datetime):
         starts = []
         ends = []
         steps = []
+        session_input = 0
+        session_output = 0
+        session_total = 0
         try:
             with path.open("r", encoding="utf-8") as f:
                 for line in f:
@@ -182,10 +185,13 @@ def load_data(log_dir: Path, now_local: datetime):
                     ts, model, agent, inp, out, total = extract_usage(rec)
                     if total:
                         per_model_total[model] += total
+                        session_total += total
                     if inp:
                         per_model_input[model] += inp
+                        session_input += inp
                     if out:
                         per_model_output[model] += out
+                        session_output += out
                     if ts is not None:
                         ts_local = ts.astimezone(LOCAL_TZ)
                         if START_TIME <= ts_local < (end_local + timedelta(minutes=1)):
@@ -218,6 +224,9 @@ def load_data(log_dir: Path, now_local: datetime):
                 "end_ts": end_ts,
                 "steps": steps,
                 "last_ts": end_ts or (parse_ts(steps[-1].get("timestamp")) if steps else start_ts),
+                "input_tokens": session_input,
+                "output_tokens": session_output,
+                "total_tokens": session_total if session_total > 0 else (session_input + session_output),
             })
 
     sessions.sort(
@@ -263,7 +272,14 @@ def build_tree_panel(sessions):
             if action == "run_agent":
                 params = st.get("parameters") or {}
                 child_agent = params.get("agent", "?")
-                step_label = f"step {step_no}: run_agent → {child_agent}"
+                display_step = step_no
+                try:
+                    display_step = int(step_no)
+                    if display_step <= 0:
+                        display_step = 1
+                except Exception:
+                    pass
+                step_label = f"step {display_step}: run_agent → {child_agent}"
                 step_node = tree_node.add(step_label)
 
                 result_str = str(st.get("result") or "")
@@ -278,6 +294,8 @@ def build_tree_panel(sessions):
                     child_label = make_label(child_sess)
                     child_node = step_node.add(child_label)
                     add_steps_and_subcalls(child_node, child_sess, file_to_session, next_stack)
+                else:
+                    step_node.add("[yellow]child starting...[/yellow]")
             else:
                 tree_node.add(f"step {step_no}: {action}")
 
@@ -297,9 +315,12 @@ def build_tokens_panel(sessions):
     table.add_column("Agent", no_wrap=True, style="cyan")
     table.add_column("Status", no_wrap=True)
     table.add_column("Steps", justify="right")
+    table.add_column("In", justify="right", style="green")
+    table.add_column("Out", justify="right", style="yellow")
+    table.add_column("Total", justify="right", style="magenta")
 
     if not sessions:
-        table.add_row("(no data)", "", "0")
+        table.add_row("(no data)", "", "0", "0", "0", "0")
     else:
         ordered = sorted(
             sessions,
@@ -308,7 +329,19 @@ def build_tokens_panel(sessions):
         )
         for s in ordered[:8]:
             status = "running" if s.get("end_ts") is None else "done"
-            table.add_row(s["agent"], status, str(len(s.get("steps", []))))
+            inp = int(s.get("input_tokens", 0) or 0)
+            out = int(s.get("output_tokens", 0) or 0)
+            total = int(s.get("total_tokens", 0) or 0)
+            if total <= 0:
+                total = inp + out
+            table.add_row(
+                s["agent"],
+                status,
+                str(len(s.get("steps", []))),
+                f"{inp:,}",
+                f"{out:,}",
+                f"{total:,}",
+            )
 
     return Panel(table, title="Current/Recent execution", box=box.SIMPLE)
 
@@ -389,7 +422,7 @@ def build_view():
 
     layout = Layout()
     layout.split_column(
-        Layout(build_tree_panel(sessions), ratio=3),
+        Layout(build_tree_panel(sessions), ratio=5),
         Layout(build_tokens_panel(sessions), ratio=1),
         Layout(build_chart_panel(per_model_input, per_model_output, per_model_total), ratio=1),
         #Layout(build_model_totals_panel(per_model_input, per_model_output), ratio=2),

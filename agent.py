@@ -309,7 +309,7 @@ SAFETY:
             child_log_path = None
 
         self._log(
-            step=-1,
+            step=0,
             action="run_agent",
             parameters={"agent": child_agent, "prompt": child_prompt},
             result=(f"child session starting | log file → {child_log_path}" if child_log_path else "child session starting")
