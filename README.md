@@ -76,6 +76,14 @@ limits:
   max_children: 5
 ```
 
+## Built-in agent profiles
+
+Current repository includes:
+- `main` — orchestration-oriented profile with broad command access
+- `code` — coding/editing profile with delegation support
+- `plan` — read-only planning profile (`read_file`, `ls`)
+- `research` — additional profile present in `agents/`
+
 ## Command contract
 
 Each module in `commands/` should expose:
@@ -147,6 +155,16 @@ Each step is logged to JSONL in `logs/` with fields like:
 - `parameters`
 - `result`
 - `timestamp`
+
+## Recent implementation notes
+
+Based on current architecture and code behavior:
+- JSON extraction strips common markdown fences and decodes the first valid object
+- Parse failures trigger corrective feedback and bounded retries
+- `final_answer` content is validated to avoid wrapped action JSON
+- `run_agent` is intercepted internally by `agent.py` (not only via command module)
+- Child execution uses depth/count/timeout safeguards
+- Runtime maintains bounded history and recent-action loop detection
 
 ## Notes on spec vs implementation
 
