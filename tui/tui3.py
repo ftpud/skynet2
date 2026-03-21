@@ -302,7 +302,7 @@ def build_total_usage_panel(buckets, per_model):
     else:
         shown = minute_labels
 
-    body = f"Total tokens: {total_tokens:,}\n{chart}"
+    body = f"\nTotal tokens: {total_tokens:,}\n{chart}"
     subtitle = f"per-minute total tokens (all models) | {' '.join(shown)}"
     return Panel(body, title="Per-minute usage (all models)", subtitle=subtitle, box=box.SIMPLE)
 
