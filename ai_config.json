@@ -1,6 +1,6 @@
 {
   "agent_files": [
-    "README.md"
+    "agent.py"
   ],
   "agent_identity": {
     "expand": "\n\nYou are local project assistent based in ./\n"

@@ -1,13 +1,16 @@
 role: "Coding specialist (fast)"
 model: "gpt-5.3-codex"
 temperature: 0.2
-max_tokens: 4096
+max_tokens: 40960
 
 permissions:
+  - replace_in_file
+  - text_block_replace
   - read_file
   - write_file
   - ls
-  
+  - linux_command
+  - append_to_file
 
 base_system_prompt: ""
 

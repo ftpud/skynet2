@@ -5,6 +5,7 @@ Follows strict JSON protocol, hierarchical spawning, bounded execution
 """
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -26,39 +27,6 @@ MAX_AGENT_DEPTH = 3
 MAX_CHILD_AGENTS = 5
 CHILD_AGENT_TIMEOUT = 60      # seconds
 
-# ───────────────────────────────────────────────
-# Built-in command metadata (shown in system prompt)
-# ───────────────────────────────────────────────
-COMMAND_INFO = {
-    "read_file": {
-        "description": "Read the content of a file and return it as text.",
-        "usage_example": '{"path": "example.txt"}'
-    },
-    "write_file": {
-        "description": "Write (or overwrite) content to a file.",
-        "usage_example": '{"path": "example.txt", "content": "Hello world"}'
-    },
-    "append_to_file": {
-        "description": "Append content to an existing file.",
-        "usage_example": '{"path": "log.txt", "content": "\\nNew line"}'
-    },
-    "replace_in_file": {
-        "description": "Replace a unique text block in a file.",
-        "usage_example": '{"path": "example.txt", "old_text": "old", "new_text": "new"}'
-    },
-    "ls": {
-        "description": "List files and directories in the given path.",
-        "usage_example": '{"path": "."}'
-    },
-    "linux_command": {
-        "description": "Run a safe Linux shell command (timeout 10s, dangerous patterns blocked).",
-        "usage_example": '{"command": "ls -la"}'
-    },
-    "run_agent": {
-        "description": "Spawn a child agent with given role and prompt.",
-        "usage_example": '{"role": "reviewer", "prompt": "Review this", "agent": "reviewer"}'
-    }
-}
 
 class Agent:
     def __init__(self, config: dict, model: str, depth: int, agent_name: str, verbose: bool = False):
@@ -86,6 +54,7 @@ class Agent:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_path = f"logs/{agent_name}_{ts}.jsonl"
 
+        self.command_info, self.command_handlers = self._load_commands()
         self.system_prompt = self._build_system_prompt()
 
         if self.verbose:
@@ -94,6 +63,49 @@ class Agent:
             print(f"   permissions  : {', '.join(config.get('permissions',[])) or '<none>'}")
             print(f"   max steps    : {self.max_steps}")
             print(f"   log file     → {self.log_path}\n")
+
+    def _load_commands(self) -> tuple[dict, dict]:
+        command_info: dict = {}
+        command_handlers: dict = {}
+
+        commands_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "commands")
+        os.makedirs(commands_dir, exist_ok=True)
+
+        for filename in sorted(os.listdir(commands_dir)):
+            if not filename.endswith(".py") or filename.startswith("_"):
+                continue
+
+            path = os.path.join(commands_dir, filename)
+            module_name = f"commands.{filename[:-3]}"
+
+            try:
+                spec = importlib.util.spec_from_file_location(module_name, path)
+                if not spec or not spec.loader:
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+
+                name = getattr(module, "COMMAND_NAME", None)
+                description = getattr(module, "DESCRIPTION", None)
+                usage_example = getattr(module, "USAGE_EXAMPLE", None)
+                handler = getattr(module, "execute", None)
+                if not callable(handler):
+                    handler = getattr(module, "run", None)
+
+                if not name or not isinstance(name, str):
+                    continue
+                if not callable(handler):
+                    continue
+
+                command_info[name] = {
+                    "description": description or "No description provided.",
+                    "usage_example": usage_example or "{}"
+                }
+                command_handlers[name] = handler
+            except Exception:
+                continue
+
+        return command_info, command_handlers
 
     def _log(self, step: int, action: str, parameters: dict, result: str):
         entry = {
@@ -117,9 +129,9 @@ class Agent:
         cmd_list = ""
         allowed = self.config.get("permissions", [])
         for name in allowed:
-            if name not in COMMAND_INFO:
+            if name not in self.command_info:
                 continue
-            info = COMMAND_INFO[name]
+            info = self.command_info[name]
             cmd_list += f"• {name}\n  {info['description']}\n  Example: {info['usage_example']}\n\n"
 
         return f"""You are a {role} agent.
@@ -169,131 +181,20 @@ SAFETY:
         text = re.sub(r'^```json\s*|\s*```$', '', text.strip(), flags=re.MULTILINE | re.IGNORECASE)
         text = text.strip()
 
-        start = text.find('{')
-        if start == -1:
-            return None
+        decoder = json.JSONDecoder()
 
-        count = 0
-        end = -1
-        for i in range(start, len(text)):
-            if text[i] == '{':
-                count += 1
-            elif text[i] == '}':
-                count -= 1
-                if count == 0:
-                    end = i + 1
-                    break
-        if end == -1:
-            return None
+        # Try from each JSON object start and return the first object that fully parses.
+        # This is robust to extra pre/post text and braces inside JSON strings.
+        starts = [i for i, ch in enumerate(text) if ch == '{']
+        for start in starts:
+            try:
+                obj, _end = decoder.raw_decode(text[start:])
+                if isinstance(obj, dict):
+                    return obj
+            except json.JSONDecodeError:
+                continue
 
-        candidate = text[start:end]
-        # Aggressive cleanup
-        candidate = re.sub(r',\s*([}\]])', r'\1', candidate)   # trailing commas
-        candidate = candidate.replace("'", '"')
-
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            return None
-
-    # ─── Command implementations ────────────────────────────────────────
-
-    def _read_file(self, params: dict) -> str:
-        path = params.get("path", "").strip()
-        if not path:
-            return "ERROR: missing 'path'"
-        try:
-            with open(path, encoding="utf-8") as f:
-                return f.read()[:self.max_output_chars]
-        except Exception as e:
-            return f"ERROR: {e}"
-
-    def _write_file(self, params: dict) -> str:
-        path = params.get("path") or params.get("file_path")
-        content = params.get("content", "")
-        if not path:
-            return "ERROR: missing 'path'"
-        try:
-            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(content)
-            return "File written successfully."
-        except Exception as e:
-            return f"ERROR: {e}"
-
-    def _append_to_file(self, params: dict) -> str:
-        path = params.get("path") or params.get("file_path")
-        content = params.get("content", "")
-        if not path:
-            return "ERROR: missing 'path'"
-        try:
-            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(content)
-            return "Content appended successfully."
-        except Exception as e:
-            return f"ERROR: {e}"
-
-    def _replace_in_file(self, params: dict) -> str:
-        path = params.get("path") or params.get("file_path")
-        old_text = params.get("old_text")
-        new_text = params.get("new_text")
-        if not path:
-            return "ERROR: missing 'path'"
-        if old_text is None:
-            return "ERROR: missing 'old_text'"
-        if new_text is None:
-            return "ERROR: missing 'new_text'"
-
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                original = f.read()
-        except Exception as e:
-            return f"ERROR: {e}"
-
-        count = original.count(old_text)
-        if count == 0:
-            return "ERROR: old_text not found"
-        if count > 1:
-            return "ERROR: old_text is not unique"
-
-        updated = original.replace(old_text, new_text, 1)
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(updated)
-            return "Text block replaced successfully."
-        except Exception as e:
-            return f"ERROR: {e}"
-
-    def _ls(self, params: dict) -> str:
-        path = params.get("path", ".")
-        try:
-            return "\n".join(sorted(os.listdir(path)))
-        except Exception as e:
-            return f"ERROR: {e}"
-
-    def _linux_command(self, params: dict) -> str:
-        cmd = params.get("command", "").strip()
-        if not cmd:
-            return "ERROR: missing 'command'"
-
-        blocked = ["rm -rf", "shutdown", "reboot", "mkfs", ":(){:|:&};:"]
-        for pat in blocked:
-            if pat in cmd.lower():
-                return f"ERROR: dangerous command pattern blocked ({pat})"
-
-        try:
-            r = subprocess.run(
-                cmd, shell=True, capture_output=True, text=True, timeout=10
-            )
-            out = (r.stdout + "\n" + r.stderr).strip()
-            if r.returncode != 0:
-                return f"ERROR (code {r.returncode}): {out}"
-            return out[:self.max_output_chars]
-        except subprocess.TimeoutExpired:
-            return "ERROR: command timed out after 10 seconds"
-        except Exception as e:
-            return f"ERROR: {e}"
+        return None
 
     def _run_agent(self, params: dict) -> str:
         if self.depth + 1 > self.max_depth:
@@ -334,19 +235,17 @@ SAFETY:
             return f"ERROR: could not start child: {e}"
 
     def execute_command(self, name: str, params: dict) -> str:
-        handlers = {
-            "read_file":      self._read_file,
-            "write_file":     self._write_file,
-            "append_to_file": self._append_to_file,
-            "replace_in_file": self._replace_in_file,
-            "ls":             self._ls,
-            "linux_command":  self._linux_command,
-            "run_agent":      self._run_agent,
-        }
-        handler = handlers.get(name)
+        if name == "run_agent":
+            return self._run_agent(params)
+
+        handler = self.command_handlers.get(name)
         if not handler:
             return "ERROR: command not implemented"
-        return handler(params)
+
+        try:
+            return str(handler(params))
+        except Exception as e:
+            return f"ERROR: {e}"
 
     def _is_codex(self) -> bool:
         return "codex" in self.model.lower()
