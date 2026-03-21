@@ -27,7 +27,6 @@ MAX_STEPS = 30
 MAX_RETRIES_PER_STEP = 3
 MAX_OUTPUT_CHARS = 300000
 MAX_CONTEXT_MESSAGES = 20
-MAX_OBSERVATION_HISTORY_CHARS = 1200  # ~300 tokens
 MAX_AGENT_DEPTH = 3
 MAX_CHILD_AGENTS = 5
 CHILD_AGENT_TIMEOUT = 600      # seconds
@@ -83,11 +82,11 @@ class Agent:
         self.system_prompt = self._build_system_prompt()
 
         if self.verbose:
-            print(f"[START] Agent '{agent_name}' | depth={depth} | provider={self.provider} | model={model}")
-            print(f"   config role  : {config.get('role','<unset>')}")
-            print(f"   permissions  : {', '.join(config.get('permissions',[])) or '<none>'}")
-            print(f"   max steps    : {self.max_steps}")
-            print(f"   log file     → {self.log_path}\n")
+            print(f"[START] Agent '{agent_name}' | depth={depth} | provider={self.provider} | model={model}", file=sys.stderr)
+            print(f"   config role  : {config.get('role','<unset>')}", file=sys.stderr)
+            print(f"   permissions  : {', '.join(config.get('permissions',[])) or '<none>'}", file=sys.stderr)
+            print(f"   max steps    : {self.max_steps}", file=sys.stderr)
+            print(f"   log file     → {self.log_path}\n", file=sys.stderr)
 
     def _load_commands(self) -> tuple[dict, dict]:
         command_info: dict = {}
@@ -224,7 +223,7 @@ class Agent:
             if name not in self.command_info:
                 continue
             info = self.command_info[name]
-            cmd_list += f"• {name} — {info['description']}\n"
+            cmd_list += f"• {name}\n  {info['description']}\n  Example: {info['usage_example']}\n\n"
 
         allowed_agents_list = ""
         allowed_agents = self.config.get("allowed_agents", [])
@@ -232,7 +231,7 @@ class Agent:
             info = self.agent_info.get(name)
             if not info:
                 continue
-            allowed_agents_list += f"• {name} — {info['description']}\n"
+            allowed_agents_list += f"• {name}\n  {info['description']}\n\n"
 
         return f"""You are a {role} agent.
 
@@ -304,15 +303,15 @@ SAFETY:
         for start in starts:
             try:
                 obj, _end = decoder.raw_decode(text[start:])
-                if isinstance(obj, dict) and "action" in obj:
-                    # Prefer objects that look like agent actions
+                if isinstance(obj, dict) and obj.get("action") in ("command", "final_answer"):
+                    # Prefer objects that look like valid agent actions
                     return obj
-                if isinstance(obj, dict):
+                if isinstance(obj, dict) and "action" in obj:
                     candidates.append(obj)
             except json.JSONDecodeError:
                 pass
 
-        # 3. Return first dict candidate even without "action" key
+        # 3. Return first dict candidate with action key
         if candidates:
             return candidates[0]
 
@@ -456,14 +455,6 @@ SAFETY:
                 int(getattr(usage, "output_tokens", 0) or 0),
             )
 
-    def _compress_observation(self, obs: str, command_name: str) -> str:
-        if len(obs) <= MAX_OBSERVATION_HISTORY_CHARS:
-            return obs
-        head = obs[:600]
-        tail = obs[-300:]
-        removed = len(obs) - len(head) - len(tail)
-        return f"{head}\n... [truncated {removed} chars for context efficiency] ...\n{tail}"
-
     def _call_model(self, messages: list[dict]) -> tuple[str, int, int]:
         temperature = self.config.get("temperature", 0.0 if self._is_codex() else 0.7)
         if self._is_codex():
@@ -488,7 +479,7 @@ SAFETY:
                 for event in stream:
                     if event.type == "response.output_text.delta":
                         if self.verbose:
-                            print(event.delta, end="", flush=True)
+                            print(event.delta, end="", flush=True, file=sys.stderr)
                         full_response += event.delta
                         parsed_early = self._extract_json(full_response)
                         if parsed_early is not None:
@@ -521,7 +512,7 @@ SAFETY:
                 delta = chunk.choices[0].delta.content if chunk.choices else None
                 delta = delta or ""
                 if self.verbose and delta:
-                    print(delta, end="", flush=True)
+                    print(delta, end="", flush=True, file=sys.stderr)
                 full_response += delta
                 parsed_early = self._extract_json(full_response)
                 if parsed_early is not None:
@@ -555,94 +546,19 @@ SAFETY:
             in_tokens, out_tokens = 0, 0
             stop_reason = None
 
-            system_block = [
-                {
-                    "type": "text",
-                    "text": system_text,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ]
+        
 
             with self.client.messages.stream(
                 model=self.model,
-                system=system_block,
+                system=system_text,
                 messages=claude_messages,
                 temperature=temperature,
                 max_tokens=claude_max_tokens,
-                #betas=["prompt-caching-2024-07-31"],
                 #stop_sequences=["\n\n"],
             ) as stream:
                 for text in stream.text_stream:
                     if self.verbose and text:
-                        print(text, end="", flush=True)
-                    full_response += text
-                    parsed_early = self._extract_json(full_response)
-                    if parsed_early is not None:
-                        # Force-close the HTTP stream immediately — no need to wait
-                        try:
-                            stream.close()
-                        except Exception:
-                            pass
-                        break
-
-            # Final usage + stop reason (works for both early and normal completion)
-            try:
-                final_msg = stream.get_final_message()
-                usage = getattr(final_msg, "usage", None)
-                if usage is not None:
-                    in_tokens, out_tokens = self._extract_usage(usage, "claude")
-                stop_reason = getattr(final_msg, "stop_reason", None)
-            except Exception:
-                pass
-
-            if parsed_early is not None:
-                return json.dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
-            return full_response, in_tokens, out_tokens
-
-        # ── Claude streaming ─────────────────────────────────────────────
-        system_text = ""
-        claude_messages = []
-        for m in messages:
-            if m["role"] == "system":
-                system_text = m["content"]
-            else:
-                claude_messages.append(m)
-
-        # Retry with expanding max_tokens window on truncation
-        claude_max_tokens = max_tokens
-        MAX_CLAUDE_TOKENS = max_tokens
-        INITIAL_CLAUDE_TOKENS = min(40000, claude_max_tokens)
-        claude_max_tokens = INITIAL_CLAUDE_TOKENS
-        claude_attempt = 0
-        MAX_CLAUDE_RETRIES = 4
-
-        while claude_attempt < MAX_CLAUDE_RETRIES:
-            claude_attempt += 1
-            full_response = ""
-            parsed_early = None
-            in_tokens, out_tokens = 0, 0
-            stop_reason = None
-
-            system_block = [
-                {
-                    "type": "text",
-                    "text": system_text,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ]
-
-            with self.client.messages.stream(
-                model=self.model,
-                system=system_block,
-                messages=claude_messages,
-                temperature=temperature,
-                max_tokens=claude_max_tokens,
-                #betas=["prompt-caching-2024-07-31"],
-                #stop_sequences=["\n\n"],
-            ) as stream:
-                for text in stream.text_stream:
-                    if self.verbose and text:
-                        print(text, end="", flush=True)
+                        print(text, end="", flush=True, file=sys.stderr)
                     full_response += text
                     parsed_early = self._extract_json(full_response)
                     if parsed_early is not None:
@@ -680,7 +596,7 @@ SAFETY:
             if stop_reason == "max_tokens" and claude_max_tokens < MAX_CLAUDE_TOKENS:
                 new_limit = min(claude_max_tokens * 2, MAX_CLAUDE_TOKENS)
                 if self.verbose:
-                    print(f"   [claude] truncated at {claude_max_tokens} tokens → retrying with {new_limit}")
+                    print(f"   [claude] truncated at {claude_max_tokens} tokens → retrying with {new_limit}", file=sys.stderr)
                 claude_max_tokens = new_limit
                 time.sleep(0.3)
                 continue
@@ -697,7 +613,7 @@ SAFETY:
         while step < self.max_steps:
             step += 1
             if self.verbose:
-                print(f"[{step:2d}] Calling {self.provider}:{self.model} …")
+                print(f"[{step:2d}] Calling {self.provider}:{self.model} …", file=sys.stderr)
 
             messages = [
                 {"role": "system", "content": self.system_prompt}
@@ -706,7 +622,7 @@ SAFETY:
             parsed = None
             for attempt in range(1, MAX_RETRIES_PER_STEP + 1):
                 if self.verbose and attempt > 1:
-                    print(f"   retry {attempt}/{MAX_RETRIES_PER_STEP}")
+                    print(f"   retry {attempt}/{MAX_RETRIES_PER_STEP}", file=sys.stderr)
 
                 try:
                     full_response, in_tokens, out_tokens = self._call_model(messages)
@@ -714,7 +630,7 @@ SAFETY:
                     self.session_tokens_out += out_tokens
                 except Exception as e:
                     if self.verbose:
-                        print(f"   API error: {e}")
+                        print(f"   API error: {e}", file=sys.stderr)
                     time.sleep(0.7)
                     continue
 
@@ -732,7 +648,7 @@ SAFETY:
 
             if not parsed:
                 if self.verbose:
-                    print(" → Parsing failed after all retries")
+                    print(" → Parsing failed after all retries", file=sys.stderr)
                 self._log(step, "parse_failure", {}, "Max retries reached")
                 print("ERROR: Could not parse valid JSON after retries.")
                 self._log_session_end()
@@ -756,7 +672,7 @@ SAFETY:
                 for d in self.recent_actions
             }) == 1:
                 if self.verbose:
-                    print(" → Loop detected — forcing final answer")
+                    print(" → Loop detected — forcing final answer", file=sys.stderr)
                 print("Agent appears stuck in loop. Terminating.")
                 self._log_session_end()
                 return
@@ -781,7 +697,7 @@ SAFETY:
 
                 if is_invalid:
                     if self.verbose:
-                        print(" → Invalid final_answer (wrapped JSON), retrying...")
+                        print(" → Invalid final_answer (wrapped JSON), retrying...", file=sys.stderr)
 
                     error_feedback = (
                         "INVALID OUTPUT:\n"
@@ -797,7 +713,7 @@ SAFETY:
 
                 # ✅ Valid final answer → finish
                 if self.verbose:
-                    print(f"\n → Final answer:")
+                    print(f"\n → Final answer:", file=sys.stderr)
 
                 print(content)
                 self._log(step, "final_answer", {}, content)
@@ -811,28 +727,27 @@ SAFETY:
                     obs = "ERROR: this command is not permitted"
                 else:
                     if self.verbose:
-                        print(f" → {name} {params}")
+                        print(f" → {name} {params}", file=sys.stderr)
                     obs = self.execute_command(name, params, step)   # <<< pass step
 
                 obs = obs[:self.max_output_chars] + "…" if len(obs) > self.max_output_chars else obs
 
                 self.history.append({"role": "assistant", "content": json.dumps(parsed)})
-                compressed_obs = self._compress_observation(obs, name)
-                self.history.append({"role": "user", "content": f"Observation: {compressed_obs}"})
+                self.history.append({"role": "user", "content": f"Observation: {obs}"})
 
                 # <<< NEW: skip _log for run_agent (already logged above) >>>
                 if name != "run_agent":
                     self._log(step, name, params, obs)
 
                 if self.verbose:
-                    print(f"   ↳ {obs[:120]}{'…' if len(obs)>120 else ''}")
+                    print(f"   ↳ {obs[:120]}{'…' if len(obs)>120 else ''}", file=sys.stderr)
 
             else:
                 self.history.append({"role": "user", "content": "Invalid action — must be 'command' or 'final_answer'"})
 
         # max steps reached
         if self.verbose:
-            print(f"Reached max steps ({self.max_steps}) without final answer.")
+            print(f"Reached max steps ({self.max_steps}) without final answer.", file=sys.stderr)
         self._log(step, "max_steps_reached", {}, "terminated without final_answer")
         print("Agent reached maximum step limit without producing a final answer.")
 
