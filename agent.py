@@ -468,7 +468,7 @@ SAFETY:
 
                 # ✅ Valid final answer → finish
                 if self.verbose:
-                    print(f" → Final answer:\n{content}")
+                    print(f"\n → Final answer:")
 
                 print(content)
                 self._log(step, "final_answer", {}, content)
