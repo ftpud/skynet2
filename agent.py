@@ -417,11 +417,29 @@ SAFETY:
 
             if action == "final_answer":
                 content = parsed.get("content", "(no content)")
-                if self.verbose:
-                    print(f" → Final answer: {content}")
-                print(content)
-                self._log(step, "final_answer", {}, content)
-                return
+
+                # Try to unwrap JSON string
+                if isinstance(content, str):
+                    try:
+                        inner = json.loads(content)
+
+                        # If it's a valid agent action → treat it as next step
+                        if isinstance(inner, dict) and "action" in inner:
+                            if self.verbose:
+                                print(" → Unwrapped nested JSON action")
+
+                            parsed = inner
+                            action = parsed.get("action")
+                        else:
+                            print(content)
+                            return
+
+                    except json.JSONDecodeError:
+                        print(content)
+                        return
+                else:
+                    print(content)
+                    return
 
             elif action == "command":
                 name = parsed.get("name")
