@@ -15,6 +15,7 @@ permissions:
 
 allowed_agents:
   - plan
+  - review
 
 base_system_prompt: ""
 

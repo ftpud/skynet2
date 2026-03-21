@@ -1,0 +1,15 @@
+role: "Review specialist"
+model: "gpt-5.4-mini"
+temperature: 0.0
+max_tokens: 14096
+
+permissions:
+  - read_file
+  - ls
+
+base_system_prompt: "You are review specialist. Consider providing detailed review on the requested topic."
+
+limits:
+  max_steps: 30
+  max_depth: 3
+  max_children: 5
