@@ -23,6 +23,34 @@ START_TIME = APP_START_TIME.replace(second=0, microsecond=0)
 SELF_PATH = Path(__file__).resolve()
 
 
+def format_human_number(value):
+    try:
+        n = float(value)
+    except Exception:
+        n = 0.0
+
+    sign = "-" if n < 0 else ""
+    n = abs(n)
+
+    if n < 1000:
+        return f"{sign}{int(n)}"
+
+    units = [(1_000_000_000, "b"), (1_000_000, "m"), (1_000, "k")]
+    for threshold, suffix in units:
+        if n >= threshold:
+            scaled = n / threshold
+            if scaled >= 100:
+                text = f"{scaled:.0f}"
+            elif scaled >= 10:
+                text = f"{scaled:.1f}"
+            else:
+                text = f"{scaled:.1f}"
+            text = text.rstrip("0").rstrip(".")
+            return f"{sign}{text}{suffix}"
+
+    return f"{sign}{int(n)}"
+
+
 def parse_ts(value):
     if value is None:
         return None
@@ -319,7 +347,7 @@ def build_tree_panel(sessions):
 
 
 def build_tokens_panel(sessions):
-    table = Table(box=box.SIMPLE_HEAVY)
+    table = Table(box=box.SIMPLE_HEAVY, expand=True)
     table.add_column("Agent", no_wrap=True, style="cyan")
     table.add_column("Status", no_wrap=True)
     table.add_column("In", justify="right", style="green")
@@ -344,16 +372,16 @@ def build_tokens_panel(sessions):
             table.add_row(
                 s["agent"],
                 status,
-                f"{inp:,}",
-                f"{out:,}",
-                f"{total:,}",
+                format_human_number(inp),
+                format_human_number(out),
+                format_human_number(total),
             )
 
     return Panel(table, title="Current/Recent execution", box=box.SIMPLE)
 
 
 def build_usage_by_model_table(per_model_input, per_model_output, per_model_total, per_model_since_start):
-    table = Table(box=box.SIMPLE_HEAVY)
+    table = Table(box=box.SIMPLE_HEAVY, expand=True)
     table.add_column("Model", style="cyan", no_wrap=True)
     table.add_column("In", justify="right", style="green")
     table.add_column("Out", justify="right", style="yellow")
@@ -376,7 +404,13 @@ def build_usage_by_model_table(per_model_input, per_model_output, per_model_tota
             rows.append((model, inp, out, total))
         for model, inp, out, total in sorted(rows, key=lambda r: r[3], reverse=True):
             since_start = int(per_model_since_start.get(model, 0) or 0)
-            table.add_row(model, f"{inp:,}", f"{out:,}", f"{total:,}", f"{since_start:,}")
+            table.add_row(
+                model,
+                format_human_number(inp),
+                format_human_number(out),
+                format_human_number(total),
+                format_human_number(since_start),
+            )
 
     return Panel(table, title="Token totals by model", box=box.SIMPLE)
 
@@ -396,7 +430,7 @@ def build_total_usage_panel(buckets, per_model):
     else:
         shown = minute_labels
 
-    body = f"\nTotal tokens: {total_tokens:,}\n{chart}"
+    body = f"\nTotal tokens: {format_human_number(total_tokens)}\n{chart}"
     subtitle = f"per-minute total tokens (all models) | {' '.join(shown)}"
     return Panel(body, title="Per-minute usage (all models)", subtitle=subtitle, box=box.SIMPLE)
 
