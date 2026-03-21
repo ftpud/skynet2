@@ -55,6 +55,7 @@ class Agent:
         self.log_path = f"logs/{agent_name}_{ts}.jsonl"
 
         self.command_info, self.command_handlers = self._load_commands()
+        self.agent_info = self._load_agents()
         self.system_prompt = self._build_system_prompt()
 
         if self.verbose:
@@ -107,6 +108,31 @@ class Agent:
 
         return command_info, command_handlers
 
+    def _load_agents(self) -> dict:
+        agent_info: dict = {}
+
+        agents_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents")
+        os.makedirs(agents_dir, exist_ok=True)
+
+        for filename in sorted(os.listdir(agents_dir)):
+            if not (filename.endswith(".yaml") or filename.endswith(".yml")):
+                continue
+
+            path = os.path.join(agents_dir, filename)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+
+                name = os.path.splitext(filename)[0]
+                description = cfg.get("description") or cfg.get("role") or "No description provided."
+                agent_info[name] = {
+                    "description": description
+                }
+            except Exception:
+                continue
+
+        return agent_info
+
     def _log(self, step: int, action: str, parameters: dict, result: str):
         entry = {
             "step": step,
@@ -133,6 +159,14 @@ class Agent:
                 continue
             info = self.command_info[name]
             cmd_list += f"• {name}\n  {info['description']}\n  Example: {info['usage_example']}\n\n"
+
+        allowed_agents_list = ""
+        allowed_agents = self.config.get("allowed_agents", [])
+        for name in allowed_agents:
+            info = self.agent_info.get(name)
+            if not info:
+                continue
+            allowed_agents_list += f"• {name}\n  {info['description']}\n\n"
 
         return f"""You are a {role} agent.
 
@@ -164,6 +198,8 @@ CRITICAL RULES:
 
 ALLOWED COMMANDS:
 {cmd_list}
+ALLOWED AGENTS:
+{allowed_agents_list}
 
 STRATEGY:
 - Think step-by-step inside your reasoning (but do NOT output reasoning)

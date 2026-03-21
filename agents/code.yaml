@@ -11,6 +11,10 @@ permissions:
   - ls
   - linux_command
   - append_to_file
+  - run_agent
+
+allowed_agents:
+  - plan
 
 base_system_prompt: ""
 
