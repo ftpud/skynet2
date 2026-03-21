@@ -66,23 +66,53 @@ def extract_usage(record):
     )
 
     tokens_dict = record.get("tokens") or {}
+    inp = tokens_dict.get("input")
+    if inp is None:
+        inp = tokens_dict.get("inbound")
+    out = tokens_dict.get("output")
+    if out is None:
+        out = tokens_dict.get("outbound")
     total = tokens_dict.get("total")
+
+    usage = record.get("usage") or record.get("response", {}).get("usage") or {}
+
+    if inp is None:
+        inp = usage.get("input_tokens")
+    if inp is None:
+        inp = usage.get("prompt_tokens")
+    if inp is None:
+        inp = 0
+
+    if out is None:
+        out = usage.get("output_tokens")
+    if out is None:
+        out = usage.get("completion_tokens")
+    if out is None:
+        out = 0
+
+    try:
+        inp = int(inp)
+    except Exception:
+        inp = 0
+
+    try:
+        out = int(out)
+    except Exception:
+        out = 0
+
     if total is not None:
         try:
             total = int(total)
         except Exception:
-            total = 0
+            total = inp + out
     else:
-        usage = record.get("usage") or record.get("response", {}).get("usage") or {}
         total = usage.get("total_tokens")
         if total is None:
-            inp = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
-            out = usage.get("output_tokens") or usage.get("completion_tokens") or 0
             total = inp + out
         try:
             total = int(total)
         except Exception:
-            total = 0
+            total = inp + out
 
     ts = (
         parse_ts(record.get("timestamp"))
@@ -91,7 +121,7 @@ def extract_usage(record):
         or parse_ts(record.get("ts"))
     )
 
-    return ts, model, agent, total
+    return ts, model, agent, inp, out, total
 
 
 def spark(values, width=24):
@@ -126,10 +156,13 @@ def load_data(log_dir: Path, now_local: datetime):
     bucket_index = {b: i for i, b in enumerate(buckets_local)}
 
     per_model = defaultdict(lambda: [0] * total_minutes)
+    per_model_input = defaultdict(int)
+    per_model_output = defaultdict(int)
+    per_model_total = defaultdict(int)
     sessions = []
 
     if not log_dir.exists():
-        return buckets_local, per_model, sessions
+        return buckets_local, per_model, per_model_input, per_model_output, per_model_total, sessions
 
     for path in sorted(log_dir.rglob("*.jsonl")):
         starts = []
@@ -146,7 +179,13 @@ def load_data(log_dir: Path, now_local: datetime):
                     except Exception:
                         continue
 
-                    ts, model, _agent, total = extract_usage(rec)
+                    ts, model, agent, inp, out, total = extract_usage(rec)
+                    if total:
+                        per_model_total[model] += total
+                    if inp:
+                        per_model_input[model] += inp
+                    if out:
+                        per_model_output[model] += out
                     if ts is not None:
                         ts_local = ts.astimezone(LOCAL_TZ)
                         if START_TIME <= ts_local < (end_local + timedelta(minutes=1)):
@@ -185,7 +224,7 @@ def load_data(log_dir: Path, now_local: datetime):
         key=lambda s: s.get("last_ts") or s.get("start_ts") or datetime.min.replace(tzinfo=LOCAL_TZ),
         reverse=True,
     )
-    return buckets_local, per_model, sessions
+    return buckets_local, per_model, per_model_input, per_model_output, per_model_total, sessions
 
 
 def build_tree_panel(sessions):
@@ -266,25 +305,61 @@ def build_tokens_panel(sessions):
             key=lambda s: s.get("last_ts") or s.get("start_ts") or datetime.min.replace(tzinfo=LOCAL_TZ),
             reverse=True,
         )
-        for s in ordered[:20]:
+        for s in ordered[:8]:
             status = "running" if s.get("end_ts") is None else "done"
             table.add_row(s["agent"], status, str(len(s.get("steps", []))))
 
     return Panel(table, title="Current/Recent execution", box=box.SIMPLE)
 
 
-def build_chart_panel(per_model):
+def build_chart_panel(per_model_input, per_model_output, per_model_total):
     table = Table(box=box.SIMPLE_HEAVY)
     table.add_column("Model", style="cyan", no_wrap=True)
+    table.add_column("In", justify="right", style="green")
+    table.add_column("Out", justify="right", style="yellow")
     table.add_column("Total", justify="right", style="magenta")
 
-    if not per_model:
-        table.add_row("(no data)", "0")
+    models = set(per_model_total.keys()) | set(per_model_input.keys()) | set(per_model_output.keys())
+    if not models:
+        table.add_row("(no data)", "0", "0", "0")
     else:
-        for model, vals in sorted(per_model.items(), key=lambda kv: sum(kv[1]), reverse=True):
-            table.add_row(model, f"{sum(vals):,}")
+        rows = []
+        for model in models:
+            inp = int(per_model_input.get(model, 0) or 0)
+            out = int(per_model_output.get(model, 0) or 0)
+            total = int(per_model_total.get(model, 0) or 0)
+            if total <= 0:
+                total = inp + out
+            elif inp + out > total:
+                total = inp + out
+            rows.append((model, inp, out, total))
+        for model, inp, out, total in sorted(rows, key=lambda r: r[3], reverse=True):
+            table.add_row(model, f"{inp:,}", f"{out:,}", f"{total:,}")
 
     return Panel(table, title="Token totals by model", box=box.SIMPLE)
+
+
+def build_model_totals_panel(per_model_input, per_model_output):
+    table = Table(box=box.SIMPLE_HEAVY)
+    table.add_column("Model", style="cyan", no_wrap=True)
+    table.add_column("Input", justify="right", style="green")
+    table.add_column("Output", justify="right", style="yellow")
+    table.add_column("Total", justify="right", style="magenta")
+
+    models = set(per_model_input.keys()) | set(per_model_output.keys())
+    if not models:
+        table.add_row("(no data)", "0", "0", "0")
+    else:
+        rows = []
+        for model in models:
+            inp = int(per_model_input.get(model, 0) or 0)
+            out = int(per_model_output.get(model, 0) or 0)
+            total = inp + out
+            rows.append((model, inp, out, total))
+        for model, inp, out, total in sorted(rows, key=lambda r: r[3], reverse=True):
+            table.add_row(model, f"{inp:,}", f"{out:,}", f"{total:,}")
+
+    return Panel(table, title="Token totals by model (input/output)", box=box.SIMPLE)
 
 
 def build_total_usage_panel(buckets, per_model):
@@ -309,13 +384,14 @@ def build_total_usage_panel(buckets, per_model):
 
 def build_view():
     now_local = datetime.now().astimezone(LOCAL_TZ)
-    buckets, per_model, sessions = load_data(LOG_DIR, now_local)
+    buckets, per_model, per_model_input, per_model_output, per_model_total, sessions = load_data(LOG_DIR, now_local)
 
     layout = Layout()
     layout.split_column(
-        Layout(build_tree_panel(sessions), ratio=6),
-        Layout(build_tokens_panel(sessions), ratio=3),
-        Layout(build_chart_panel(per_model), ratio=2),
+        Layout(build_tree_panel(sessions), ratio=4),
+        Layout(build_tokens_panel(sessions), ratio=2),
+        Layout(build_chart_panel(per_model_input, per_model_output, per_model_total), ratio=3),
+        #Layout(build_model_totals_panel(per_model_input, per_model_output), ratio=2),
         Layout(build_total_usage_panel(buckets, per_model), ratio=2),
     )
     return layout
