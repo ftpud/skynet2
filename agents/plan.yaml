@@ -7,7 +7,7 @@ permissions:
   - read_file
   - ls
 
-base_system_prompt: ""
+base_system_prompt: "You are planning specialist. Provide detailed step by step plan."
 
 limits:
   max_steps: 30

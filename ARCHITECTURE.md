@@ -1,197 +1,221 @@
-# Agent Architecture
+# Architecture
 
-## Overview
-`agent.py` implements a production-oriented, lightweight ReAct-style CLI agent that:
-- Enforces strict single-JSON responses from the model
-- Executes only permitted commands
-- Supports hierarchical child-agent spawning
-- Applies bounded execution limits (steps, retries, depth, output size)
-- Logs step-by-step execution to JSONL
+## System Overview
+This repository implements a lightweight, production-oriented AI agent runtime in Python (`agent.py`) that follows a bounded ReAct-style loop:
+- Model produces exactly one JSON action
+- Runtime executes an allowed command or returns a final answer
+- Command result is fed back as an observation
+- Loop continues until `final_answer` or limits are reached
 
-The runtime loop is: **Prompt → Model JSON action → Command execution / Final answer → Observation feedback → Repeat**.
-
----
-
-## High-Level Components
-
-### 1. CLI Entrypoint
-At startup (`if __name__ == "__main__":`), the script:
-1. Parses CLI args (`--agent`, `--prompt`, `--model`, `--depth`, `--verbose`)
-2. Loads YAML config from `agents/<agent>.yaml`
-3. Resolves model (CLI override or config)
-4. Validates `OPENAI_API_KEY`
-5. Instantiates `Agent`
-6. Calls `agent.run(prompt)`
-
-### 2. `Agent` Core Class
-The `Agent` class encapsulates all orchestration:
-- Config/model/depth state
-- OpenAI client
-- Conversation history
-- Command registry and handlers
-- Safety/limit controls
-- Logging
-
-### 3. Command Plugin System
-Commands are dynamically loaded from `commands/*.py`:
-- Required: `COMMAND_NAME` and callable `execute(params)` (or fallback `run(params)`)
-- Optional: `DESCRIPTION`, `USAGE_EXAMPLE`
-
-Loaded commands are split into:
-- `command_info`: metadata for prompt construction
-- `command_handlers`: executable callables
-
-### 4. LLM Interaction Layer
-Uses `self.client.responses.stream(...)` for streamed text deltas.
-The agent accumulates output and parses a JSON object from it.
-
-### 5. Execution + Feedback Loop
-Each step:
-1. Build messages (`system` + recent history)
-2. Query model (with retries)
-3. Parse JSON action
-4. Execute command or finalize
-5. Append observation back into history
-6. Continue until final answer or limits reached
+The system is designed around:
+- **Single-role agents** configured via YAML in `agents/`
+- **Dynamic command loading** from `commands/`
+- **Strict JSON protocol enforcement** in the system prompt and parser
+- **Hierarchical execution** via `run_agent` with depth/child limits
+- **Structured JSONL logging** under `logs/`
 
 ---
 
-## Detailed Control Flow
-
-## Initialization (`Agent.__init__`)
-- Stores runtime parameters
-- Initializes OpenAI client
-- Initializes history and loop-detection buffer
-- Reads limits from `config["limits"]` with global defaults
-- Creates `logs/` and per-run JSONL log file
-- Loads command plugins
-- Builds system prompt including only permitted commands
-
-## System Prompt Construction (`_build_system_prompt`)
-Prompt includes:
-- Agent role and base instructions from config
-- Strict JSON output contract
-- Allowed command list with descriptions/examples
-- Strategy and safety rules
-
-This is the primary policy boundary for model behavior.
-
-## Main Loop (`run`)
-Bounded by `max_steps`.
-
-For each step:
-1. Compose `messages` with system prompt + truncated history (`MAX_CONTEXT_MESSAGES`)
-2. Attempt model call up to `MAX_RETRIES_PER_STEP`
-3. Parse JSON via `_extract_json`
-4. If parse fails repeatedly, terminate with error
-5. Validate `action`
-6. Loop detection: terminate if last 3 actions are identical
-7. Branch:
-   - `final_answer`: validate content is plain text (reject wrapped JSON), print and exit
-   - `command`: permission-check, execute, append observation, continue
-   - otherwise: inject corrective feedback
+## Repository Layout
+- `agent.py` — main runtime, CLI entrypoint, loop orchestration, parsing, logging, command/agent discovery
+- `agents/` — per-agent YAML configs (role, model, permissions, limits)
+  - `main.yaml` — orchestrator profile
+  - `code.yaml` — coding profile (includes file-edit commands + `run_agent`)
+  - `plan.yaml` — planning profile (read-only discovery)
+  - `research.yaml` — additional profile (present in tree)
+- `commands/` — pluggable command modules
+  - `read_file.py`, `write_file.py`, `append_to_file.py`
+  - `replace_in_file.py`, `text_block_replace.py`
+  - `ls.py`, `linux_command.py`, `run_agent.py`
+- `logs/` and `*.log` — runtime logs/artifacts
+- `README.md` — requirements/specification and behavior contract
 
 ---
 
-## JSON Parsing Strategy (`_extract_json`)
-Robust parsing approach:
-- Strips common markdown fences
-- Scans for every `{` position
-- Uses `json.JSONDecoder().raw_decode` from each candidate
-- Returns first successfully parsed dict
+## High-Level Component Model
 
-This tolerates extra text around JSON and malformed prefixes.
+```text
+User CLI
+  |
+  v
+agent.py (Agent runtime)
+  |- loads agent config (agents/<name>.yaml)
+  |- discovers commands (commands/*.py)
+  |- builds strict system prompt
+  |- runs ReAct loop with OpenAI Responses API
+  |
+  +--> Command execution layer
+  |      |- local command handlers (dynamic modules)
+  |      |- special-cased run_agent (subprocess child)
+  |
+  +--> Logging layer (JSONL in logs/)
+```
 
----
-
-## Command Execution Model
-
-## `execute_command`
-- Special-cases `run_agent` for hierarchical spawning
-- Otherwise dispatches to loaded handler
-- Wraps handler exceptions as `ERROR: ...`
-
-## Permission Enforcement
-Even if a command exists, it runs only if listed in `config["permissions"]`.
-Otherwise observation is `ERROR: this command is not permitted`.
-
-## Observation Feedback
-After command execution:
-- Assistant message stores the JSON action
-- User message stores `Observation: <result>`
-
-This preserves ReAct-style tool feedback for subsequent reasoning.
+Core responsibilities:
+- **Orchestration:** step loop, retries, context windowing, termination
+- **Policy enforcement:** permissions, limits, JSON action schema
+- **Execution:** invoke command handlers and capture observations
+- **Resilience:** parse recovery, retry feedback, exception-to-string conversion
 
 ---
 
-## Hierarchical Agent Spawning (`_run_agent`)
-`run_agent` launches a child process of the same script with:
-- `--agent <child_agent>`
-- `--prompt <child_prompt>`
-- `--depth parent+1`
-- inherited model/verbosity options
+## Runtime Lifecycle
 
-Safety bounds:
-- `max_depth`
-- `max_children`
-- subprocess timeout (`CHILD_AGENT_TIMEOUT`)
+## 1) Startup / Initialization
+1. CLI parses:
+   - `--agent` (required)
+   - `--prompt` (required)
+   - `--model` (optional override)
+   - `--depth` (internal for child agents)
+   - `--verbose`
+2. Loads `agents/<agent>.yaml`
+3. Validates model and `OPENAI_API_KEY`
+4. Instantiates `Agent`:
+   - loads limits from config (with global defaults)
+   - creates log file `logs/<agent>_<timestamp>.jsonl`
+   - discovers commands from `commands/`
+   - discovers available agents from `agents/`
+   - builds system prompt with allowed commands/agents
 
-Child stdout is wrapped as `FINAL_ANSWER: ...`; failures return structured error text.
+## 2) ReAct Loop
+For each step (up to `max_steps`):
+1. Compose messages = system prompt + bounded history
+2. Call OpenAI Responses API (streaming)
+3. Accumulate text deltas
+4. Extract first valid JSON object
+5. If parse fails, append corrective feedback and retry (up to retry limit)
+6. Execute action:
+   - `command` → validate permission, execute, append `Observation: ...`
+   - `final_answer` → validate content is plain text (not wrapped JSON), print and exit
+7. Detect loops (3 identical recent actions) and terminate if stuck
+
+## 3) Termination Paths
+- Valid `final_answer`
+- Parse failure after retries
+- Loop detected
+- Max steps reached
 
 ---
 
-## Safety and Reliability Mechanisms
+## Command Architecture
+Commands are discovered dynamically from `commands/*.py` using importlib.
 
-1. **Step bound**: `max_steps`
-2. **Retry bound**: `MAX_RETRIES_PER_STEP` for invalid model output/API issues
-3. **Context bound**: only recent `MAX_CONTEXT_MESSAGES`
-4. **Output bound**: command output truncated to `MAX_OUTPUT_CHARS`
-5. **Hierarchy bounds**: max depth + max child count + child timeout
-6. **Loop detection**: abort on 3 identical consecutive actions
-7. **Final-answer guard**: rejects JSON wrapped inside `final_answer.content`
-8. **Permission gate**: command allowlist from config
+Expected module contract (as implemented by loader):
+- `COMMAND_NAME` (string)
+- optional `DESCRIPTION`
+- optional `USAGE_EXAMPLE`
+- callable `execute(parameters)` (or fallback `run`)
+
+At runtime:
+- Only commands listed in agent `permissions` are executable
+- Unknown/unloaded commands are ignored at discovery or rejected at execution
+- Command exceptions are caught and converted to `ERROR: ...` strings
+- Output is truncated to `max_output_chars`
+
+### Special Case: `run_agent`
+`agent.py` intercepts `run_agent` and handles it internally:
+- Enforces depth and child-count limits
+- Spawns child process: `python agent.py --agent ... --prompt ... --depth ...`
+- Applies timeout (`CHILD_AGENT_TIMEOUT`)
+- Returns `FINAL_ANSWER: <stdout>` on success or `ERROR: ...` on failure
 
 ---
 
-## Logging
-Each step writes JSONL to `logs/<agent>_<timestamp>.jsonl` with:
-- step number
+## Agent Configuration Model (`agents/*.yaml`)
+Common fields used by runtime:
+- `role` — inserted into system prompt
+- `model` — default model
+- `temperature`, `max_tokens` — passed to model call
+- `permissions` — allowlist of executable commands
+- `allowed_agents` — listed in prompt for delegation visibility
+- `base_system_prompt` — extra instruction text
+- `limits`:
+  - `max_steps`
+  - `max_depth`
+  - `max_children`
+
+### Notable configured profiles
+- **main**: orchestration-oriented, broad command access
+- **code**: coding/editing command set + delegation to `plan`
+- **plan**: read-only planning profile (`read_file`, `ls`)
+
+---
+
+## JSON Protocol and Parsing
+The runtime enforces a strict two-action JSON contract in the system prompt:
+- command action
+- final_answer action
+
+Parsing behavior in `agent.py`:
+- strips common markdown fences
+- scans for `{` positions
+- attempts `json.JSONDecoder().raw_decode(...)`
+- accepts first parsed dict object
+
+If invalid:
+- appends explicit correction message to history
+- retries within per-step retry budget
+
+Additional guard:
+- rejects `final_answer.content` that itself contains wrapped action JSON
+
+---
+
+## Context, State, and Data Flow
+State held in-memory per agent instance:
+- `history` (bounded to `MAX_CONTEXT_MESSAGES`)
+- `recent_actions` (last 3 for loop detection)
+- `spawned_children` counter
+
+Data flow:
+1. User prompt enters history
+2. Model emits JSON action
+3. Runtime executes command
+4. Observation appended as user message
+5. Loop repeats until completion
+
+Persistence:
+- Structured step logs written to JSONL (`logs/...jsonl`)
+- No database/state store beyond files/logs
+
+---
+
+## Observability and Operations
+Logging (`_log`) records:
+- step
 - action
 - parameters
 - truncated result preview
 - timestamp
 
-Logging failures are intentionally non-fatal.
+Operational safeguards:
+- bounded steps/retries/context
+- permission checks before command execution
+- child-agent depth/count/timeout controls
+- exception handling around API and command execution
 
 ---
 
-## Configuration Contract (YAML)
-Expected fields in `agents/<name>.yaml`:
-- `role`: agent role label for prompt
-- `base_system_prompt`: additional instruction text
-- `model`: default model name
-- `temperature`, `max_tokens`: model call settings
-- `permissions`: list of allowed command names
-- `limits` (optional):
-  - `max_steps`
-  - `max_depth`
-  - `max_children`
+## Extension Guide
+### Add a new command
+1. Create `commands/<name>.py`
+2. Define `COMMAND_NAME`, `DESCRIPTION`, `USAGE_EXAMPLE`
+3. Implement `execute(parameters: dict) -> str`
+4. Add command name to target agent `permissions`
+
+### Add a new agent profile
+1. Create `agents/<agent>.yaml`
+2. Set role/model/permissions/limits
+3. Invoke via CLI `--agent <agent>`
+4. Optionally expose in another agent’s `allowed_agents`
 
 ---
 
-## External Dependencies
-- `openai` (Responses API streaming)
-- `pyyaml`
-- Python stdlib: argparse, importlib, json, os, re, subprocess, sys, time, datetime
+## Known Gaps vs README Requirements (Current Implementation)
+- `MAX_OUTPUT_CHARS` in code is `300000` (README states `2000`)
+- Retry loop uses global `MAX_RETRIES_PER_STEP`, not config override
+- `_extract_json` does not implement trailing-comma/single-quote repair described in README
+- `run_agent` command is handled internally; module exists but runtime bypasses it
+- `allowed_agents` is informational in prompt; enforcement is not explicit in `_run_agent`
 
----
-
-## Architectural Summary
-The design is a **bounded tool-using agent runtime** with:
-- strict output protocol,
-- dynamic command plugins,
-- explicit permissioning,
-- iterative observation-driven reasoning,
-- and controlled multi-agent delegation.
-
-It prioritizes operational safety and recoverability over autonomy by enforcing hard limits, retries, and validation at each stage.
+These are implementation realities and should be considered if strict spec conformance is required.
