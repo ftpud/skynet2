@@ -248,12 +248,14 @@ def build_tree_panel(sessions):
         status = "[green]done[/green]" if s.get("end_ts") else "[yellow]running[/yellow]"
         return f"{s['agent']} d={depth} {status}"
 
-    def add_steps_and_subcalls(tree_node, sess, file_to_session, visited):
+    def add_steps_and_subcalls(tree_node, sess, file_to_session, path_stack):
         sess_file = sess.get("file")
-        if sess_file in visited:
-            tree_node.add("[red]cycle or duplicate[/red]")
+        if sess_file in path_stack:
+            tree_node.add("[red]cycle detected[/red]")
             return
-        visited.add(sess_file)
+
+        next_stack = set(path_stack)
+        next_stack.add(sess_file)
 
         for st in sess.get("steps", []):
             step_no = st.get("step", "?")
@@ -275,18 +277,17 @@ def build_tree_panel(sessions):
                 if child_sess:
                     child_label = make_label(child_sess)
                     child_node = step_node.add(child_label)
-                    add_steps_and_subcalls(child_node, child_sess, file_to_session, visited)
+                    add_steps_and_subcalls(child_node, child_sess, file_to_session, next_stack)
             else:
                 tree_node.add(f"step {step_no}: {action}")
 
     if not ordered_roots:
         root.add("(no root sessions)")
     else:
-        visited = set()
         for root_sess in ordered_roots:
             label = make_label(root_sess)
             sess_node = root.add(label)
-            add_steps_and_subcalls(sess_node, root_sess, file_to_session, visited)
+            add_steps_and_subcalls(sess_node, root_sess, file_to_session, set())
 
     return Panel(root, title="Work tree", box=box.SIMPLE)
 
@@ -388,11 +389,11 @@ def build_view():
 
     layout = Layout()
     layout.split_column(
-        Layout(build_tree_panel(sessions), ratio=4),
-        Layout(build_tokens_panel(sessions), ratio=2),
-        Layout(build_chart_panel(per_model_input, per_model_output, per_model_total), ratio=3),
+        Layout(build_tree_panel(sessions), ratio=3),
+        Layout(build_tokens_panel(sessions), ratio=1),
+        Layout(build_chart_panel(per_model_input, per_model_output, per_model_total), ratio=1),
         #Layout(build_model_totals_panel(per_model_input, per_model_output), ratio=2),
-        Layout(build_total_usage_panel(buckets, per_model), ratio=2),
+        Layout(build_total_usage_panel(buckets, per_model), ratio=1),
     )
     return layout
 

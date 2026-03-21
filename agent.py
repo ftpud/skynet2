@@ -301,6 +301,20 @@ SAFETY:
         if self.verbose:
             cmd += ["--verbose"]
 
+        child_log_path = None
+        try:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            child_log_path = os.path.join(self.logs_dir, f"{child_agent}_{ts}.jsonl")
+        except Exception:
+            child_log_path = None
+
+        self._log(
+            step=-1,
+            action="run_agent",
+            parameters={"agent": child_agent, "prompt": child_prompt},
+            result=(f"child session starting | log file → {child_log_path}" if child_log_path else "child session starting")
+        )
+
         try:
             r = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=CHILD_AGENT_TIMEOUT
