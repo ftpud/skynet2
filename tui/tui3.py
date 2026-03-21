@@ -269,12 +269,9 @@ def build_tree_panel(sessions):
         for st in sess.get("steps", []):
             step_no = st.get("step", "?")
             action = st.get("action", "?")
-
             if action == "run_agent":
                 params = st.get("parameters") or {}
                 child_agent = params.get("agent", "?")
-
-                # Force display step (same as before)
                 display_step = step_no
                 try:
                     display_step = int(step_no)
@@ -283,23 +280,15 @@ def build_tree_panel(sessions):
                 except Exception:
                     pass
                 step_label = f"step {display_step}: run_agent → {child_agent}"
-
-                result_str = str(st.get("result") or "")
-
-                # === FIX START ===
-                # Only the "starting" log contains the child log-file path.
-                # The completion log ("FINAL_ANSWER:...") is redundant → skip it.
-                match = re.search(r"log file\s+→\s+([^\n]+)", result_str)
-                if not match:
-                    continue  # ← this removes the duplicate node
-                # === FIX END ===
-
-                # This is the real starting record → build the tree node
                 step_node = tree_node.add(step_label)
 
-                child_path = match.group(1).strip()
-                child_file = Path(child_path).name
-                child_sess = file_to_session.get(child_file)
+                result_str = str(st.get("result") or "")
+                match = re.search(r"log file\s+→\s+([^\n]+)", result_str)
+                child_sess = None
+                if match:
+                    child_path = match.group(1).strip()
+                    child_file = Path(child_path).name
+                    child_sess = file_to_session.get(child_file)
 
                 if child_sess:
                     child_label = make_label(child_sess)
@@ -307,9 +296,7 @@ def build_tree_panel(sessions):
                     add_steps_and_subcalls(child_node, child_sess, file_to_session, next_stack)
                 else:
                     step_node.add("[yellow]child starting...[/yellow]")
-
             else:
-                # normal steps (linux_command, final_answer, etc.)
                 tree_node.add(f"step {step_no}: {action}")
 
     if not ordered_roots:
@@ -359,7 +346,7 @@ def build_tokens_panel(sessions):
     return Panel(table, title="Current/Recent execution", box=box.SIMPLE)
 
 
-def build_chart_panel(per_model_input, per_model_output, per_model_total):
+def build_usage_by_model_table(per_model_input, per_model_output, per_model_total):
     table = Table(box=box.SIMPLE_HEAVY)
     table.add_column("Model", style="cyan", no_wrap=True)
     table.add_column("In", justify="right", style="green")
@@ -384,29 +371,6 @@ def build_chart_panel(per_model_input, per_model_output, per_model_total):
             table.add_row(model, f"{inp:,}", f"{out:,}", f"{total:,}")
 
     return Panel(table, title="Token totals by model", box=box.SIMPLE)
-
-
-def build_model_totals_panel(per_model_input, per_model_output):
-    table = Table(box=box.SIMPLE_HEAVY)
-    table.add_column("Model", style="cyan", no_wrap=True)
-    table.add_column("Input", justify="right", style="green")
-    table.add_column("Output", justify="right", style="yellow")
-    table.add_column("Total", justify="right", style="magenta")
-
-    models = set(per_model_input.keys()) | set(per_model_output.keys())
-    if not models:
-        table.add_row("(no data)", "0", "0", "0")
-    else:
-        rows = []
-        for model in models:
-            inp = int(per_model_input.get(model, 0) or 0)
-            out = int(per_model_output.get(model, 0) or 0)
-            total = inp + out
-            rows.append((model, inp, out, total))
-        for model, inp, out, total in sorted(rows, key=lambda r: r[3], reverse=True):
-            table.add_row(model, f"{inp:,}", f"{out:,}", f"{total:,}")
-
-    return Panel(table, title="Token totals by model (input/output)", box=box.SIMPLE)
 
 
 def build_total_usage_panel(buckets, per_model):
@@ -435,11 +399,11 @@ def build_view():
 
     layout = Layout()
     layout.split_column(
-        Layout(build_tree_panel(sessions), ratio=5),
+        Layout(build_tree_panel(sessions), ratio=3),
         Layout(build_tokens_panel(sessions), ratio=1),
-        Layout(build_chart_panel(per_model_input, per_model_output, per_model_total), ratio=1),
-        #Layout(build_model_totals_panel(per_model_input, per_model_output), ratio=2),
-        Layout(build_total_usage_panel(buckets, per_model), ratio=1),
+        Layout(build_usage_by_model_table(per_model_input, per_model_output, per_model_total), ratio=1),
+        
+        #Layout(build_total_usage_panel(buckets, per_model), ratio=1),
     )
     return layout
 
