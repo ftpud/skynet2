@@ -1,7 +1,7 @@
 import subprocess
 
 COMMAND_NAME = "linux_command"
-DESCRIPTION = "Run a safe Linux shell command and return captured output."
+DESCRIPTION = "Run a Linux shell command and return captured output."
 USAGE_EXAMPLE = '{"action":"command","name":"linux_command","parameters":{"command":"ls -la"}}'
 
 _BLOCKED = [
