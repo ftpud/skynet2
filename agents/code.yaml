@@ -1,7 +1,7 @@
 role: "Coding specialist"
 model: "gpt-5.3-codex"
 temperature: 0.2
-max_tokens: 40960
+max_tokens: 400000
 
 permissions:
   - replace_in_file

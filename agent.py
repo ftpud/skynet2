@@ -29,7 +29,7 @@ CHILD_AGENT_TIMEOUT = 60      # seconds
 
 
 class Agent:
-    def __init__(self, config: dict, model: str, depth: int, agent_name: str, verbose: bool = False):
+    def __init__(self, config: dict, model: str, depth: int, agent_name: str, verbose: bool = False, log_path: str | None = None):
         self.config = config
         self.model = model
         self.depth = depth
@@ -51,12 +51,17 @@ class Agent:
         self.max_output_chars    = MAX_OUTPUT_CHARS
         self.max_context_messages = MAX_CONTEXT_MESSAGES
 
-        # Logging (always relative to this script directory, not current working directory)
+        # Logging — now supports parent-passed exact path
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
         self.logs_dir = os.path.join(self.base_dir, "logs")
         os.makedirs(self.logs_dir, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.log_path = os.path.join(self.logs_dir, f"{agent_name}_{ts}.jsonl")
+
+        if log_path is not None:
+            self.log_path = log_path                      # ← use exactly what parent gave us
+        else:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.log_path = os.path.join(self.logs_dir, f"{agent_name}_{ts}.jsonl")
+
         self._log_session_start()
 
         self.command_info, self.command_handlers = self._load_commands()
@@ -277,7 +282,7 @@ SAFETY:
 
         return None
 
-    def _run_agent(self, params: dict) -> str:
+    def _run_agent(self, params: dict, step: int) -> str:
         if self.depth + 1 > self.max_depth:
             return "ERROR: maximum nesting depth reached"
         if self.spawned_children >= self.max_children:
@@ -290,30 +295,27 @@ SAFETY:
 
         self.spawned_children += 1
 
+        # Parent decides the exact filename the child will use
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        child_log_path = os.path.join(self.logs_dir, f"{child_agent}_{ts}.jsonl")
+
+        # Log ONCE with real step number
+        self._log(
+            step=step,
+            action="run_agent",
+            parameters={"agent": child_agent, "prompt": child_prompt},
+            result=f"child session starting | log file → {child_log_path}"
+        )
+
         cmd = [
             sys.executable, os.path.abspath(__file__),
             "--agent", child_agent,
             "--prompt", child_prompt,
             "--depth", str(self.depth + 1),
+            "--log-path", child_log_path,          # ← pass exact path
         ]
-        #if self.model:
-        #    cmd += ["--model", self.model]
         if self.verbose:
             cmd += ["--verbose"]
-
-        child_log_path = None
-        try:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            child_log_path = os.path.join(self.logs_dir, f"{child_agent}_{ts}.jsonl")
-        except Exception:
-            child_log_path = None
-
-        self._log(
-            step=0,
-            action="run_agent",
-            parameters={"agent": child_agent, "prompt": child_prompt},
-            result=(f"child session starting | log file → {child_log_path}" if child_log_path else "child session starting")
-        )
 
         try:
             r = subprocess.run(
@@ -329,9 +331,9 @@ SAFETY:
         except Exception as e:
             return f"ERROR: could not start child: {e}"
 
-    def execute_command(self, name: str, params: dict) -> str:
+    def execute_command(self, name: str, params: dict, step: int) -> str:
         if name == "run_agent":
-            return self._run_agent(params)
+            return self._run_agent(params, step)   # pass real step
 
         handler = self.command_handlers.get(name)
         if not handler:
@@ -503,13 +505,16 @@ SAFETY:
                 else:
                     if self.verbose:
                         print(f" → {name} {params}")
-                    obs = self.execute_command(name, params)
+                    obs = self.execute_command(name, params, step)   # <<< pass step
 
                 obs = obs[:self.max_output_chars] + "…" if len(obs) > self.max_output_chars else obs
 
                 self.history.append({"role": "assistant", "content": json.dumps(parsed)})
                 self.history.append({"role": "user", "content": f"Observation: {obs}"})
-                self._log(step, name, params, obs)
+
+                # <<< NEW: skip _log for run_agent (already logged above) >>>
+                if name != "run_agent":
+                    self._log(step, name, params, obs)
 
                 if self.verbose:
                     print(f"   ↳ {obs[:120]}{'…' if len(obs)>120 else ''}")
@@ -532,6 +537,7 @@ if __name__ == "__main__":
     parser.add_argument("--prompt",  required=True,  help="initial user prompt / task")
     parser.add_argument("--model",   default=None,   help="override model name")
     parser.add_argument("--depth",   type=int, default=0, help="current hierarchy depth (internal)")
+    parser.add_argument("--log-path", default=None, help="internal: exact log file path (for child agents)")  # ← NEW
     parser.add_argument("-v", "--verbose", action="store_true", help="show detailed progress")
 
     args = parser.parse_args()
@@ -563,7 +569,8 @@ if __name__ == "__main__":
         model=model,
         depth=args.depth,
         agent_name=args.agent,
-        verbose=args.verbose
+        verbose=args.verbose,
+        log_path=args.log_path
     )
 
     agent.run(args.prompt)
