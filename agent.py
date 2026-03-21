@@ -145,7 +145,10 @@ class Agent:
             "action": action,
             "parameters": parameters,
             "result": result[:500] + "…" if len(result) > 500 else result,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "agent": self.agent_name,
+            "model": self.model,
+            "depth": self.depth
         }
         try:
             with open(self.log_path, "a", encoding="utf-8") as f:
@@ -235,6 +238,7 @@ CRITICAL RULES:
 - Use one of the allowed commands below
 - Do not repeat the same action/parameters more than twice
 - NEVER wrap action in final_answer
+- Always perform all required steps by commands
 
 
 ALLOWED COMMANDS:
