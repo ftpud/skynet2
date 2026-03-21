@@ -20,7 +20,7 @@ from openai import OpenAI
 # ───────────────────────────────────────────────
 MAX_STEPS = 30
 MAX_RETRIES_PER_STEP = 3
-MAX_OUTPUT_CHARS = 2000
+MAX_OUTPUT_CHARS = 300000
 MAX_CONTEXT_MESSAGES = 20
 MAX_AGENT_DEPTH = 3
 MAX_CHILD_AGENTS = 5
@@ -41,6 +41,10 @@ COMMAND_INFO = {
     "append_to_file": {
         "description": "Append content to an existing file.",
         "usage_example": '{"path": "log.txt", "content": "\\nNew line"}'
+    },
+    "replace_in_file": {
+        "description": "Replace a unique text block in a file.",
+        "usage_example": '{"path": "example.txt", "old_text": "old", "new_text": "new"}'
     },
     "ls": {
         "description": "List files and directories in the given path.",
@@ -136,14 +140,15 @@ Possible actions:
 2. Give final answer and stop
 {{
   "action": "final_answer",
-  "content": "your complete answer here"
+  "content": "PLAIN TEXT ONLY"
 }}
 
 CRITICAL RULES:
 - ONLY output valid JSON — no explanations, no markdown, no ```json blocks
 - Use one of the allowed commands below
 - Do not repeat the same action/parameters more than twice
-- If stuck or no progress → use final_answer
+- NEVER wrap action in final_answer
+
 
 ALLOWED COMMANDS:
 {cmd_list}
@@ -152,6 +157,8 @@ STRATEGY:
 - Think step-by-step inside your reasoning (but do NOT output reasoning)
 - Prefer shortest reliable path
 - If command fails → try different approach, do NOT loop
+- Never ask for confirmation
+- Always perform all steps
 
 SAFETY:
 - Never run destructive commands (rm -rf, shutdown, etc.)
@@ -202,7 +209,7 @@ SAFETY:
             return f"ERROR: {e}"
 
     def _write_file(self, params: dict) -> str:
-        path = params.get("path")
+        path = params.get("path") or params.get("file_path")
         content = params.get("content", "")
         if not path:
             return "ERROR: missing 'path'"
@@ -215,7 +222,7 @@ SAFETY:
             return f"ERROR: {e}"
 
     def _append_to_file(self, params: dict) -> str:
-        path = params.get("path")
+        path = params.get("path") or params.get("file_path")
         content = params.get("content", "")
         if not path:
             return "ERROR: missing 'path'"
@@ -224,6 +231,37 @@ SAFETY:
             with open(path, "a", encoding="utf-8") as f:
                 f.write(content)
             return "Content appended successfully."
+        except Exception as e:
+            return f"ERROR: {e}"
+
+    def _replace_in_file(self, params: dict) -> str:
+        path = params.get("path") or params.get("file_path")
+        old_text = params.get("old_text")
+        new_text = params.get("new_text")
+        if not path:
+            return "ERROR: missing 'path'"
+        if old_text is None:
+            return "ERROR: missing 'old_text'"
+        if new_text is None:
+            return "ERROR: missing 'new_text'"
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                original = f.read()
+        except Exception as e:
+            return f"ERROR: {e}"
+
+        count = original.count(old_text)
+        if count == 0:
+            return "ERROR: old_text not found"
+        if count > 1:
+            return "ERROR: old_text is not unique"
+
+        updated = original.replace(old_text, new_text, 1)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(updated)
+            return "Text block replaced successfully."
         except Exception as e:
             return f"ERROR: {e}"
 
@@ -297,12 +335,13 @@ SAFETY:
 
     def execute_command(self, name: str, params: dict) -> str:
         handlers = {
-            "read_file":     self._read_file,
-            "write_file":    self._write_file,
+            "read_file":      self._read_file,
+            "write_file":     self._write_file,
             "append_to_file": self._append_to_file,
-            "ls":            self._ls,
-            "linux_command": self._linux_command,
-            "run_agent":     self._run_agent,
+            "replace_in_file": self._replace_in_file,
+            "ls":             self._ls,
+            "linux_command":  self._linux_command,
+            "run_agent":      self._run_agent,
         }
         handler = handlers.get(name)
         if not handler:
@@ -418,28 +457,44 @@ SAFETY:
             if action == "final_answer":
                 content = parsed.get("content", "(no content)")
 
-                # Try to unwrap JSON string
+                # 🚨 Detect wrapped JSON → reject + retry
+                is_invalid = False
+
                 if isinstance(content, str):
-                    try:
-                        inner = json.loads(content)
+                    stripped = content.strip()
 
-                        # If it's a valid agent action → treat it as next step
-                        if isinstance(inner, dict) and "action" in inner:
-                            if self.verbose:
-                                print(" → Unwrapped nested JSON action")
+                    # Fast check (cheap)
+                    if stripped.startswith("{") and stripped.endswith("}"):
+                        try:
+                            inner = json.loads(stripped)
+                            if isinstance(inner, dict) and "action" in inner:
+                                is_invalid = True
+                        except:
+                            pass
 
-                            parsed = inner
-                            action = parsed.get("action")
-                        else:
-                            print(content)
-                            return
+                if is_invalid:
+                    if self.verbose:
+                        print(" → Invalid final_answer (wrapped JSON), retrying...")
 
-                    except json.JSONDecodeError:
-                        print(content)
-                        return
-                else:
-                    print(content)
-                    return
+                    error_feedback = (
+                        "INVALID OUTPUT:\n"
+                        "You returned JSON inside 'content'. This is not allowed.\n\n"
+                        "You MUST return either:\n"
+                        '1. {"action":"command","name":"...","parameters":{}}\n'
+                        '2. {"action":"final_answer","content":"plain text"}\n\n'
+                        "Do NOT wrap JSON in strings."
+                    )
+
+                    self.history.append({"role": "user", "content": error_feedback})
+                    continue  # 🔁 retry same step
+
+                # ✅ Valid final answer → finish
+                if self.verbose:
+                    print(f" → Final answer:\n{content}")
+
+                print(content)
+                self._log(step, "final_answer", {}, content)
+                return
 
             elif action == "command":
                 name = parsed.get("name")
