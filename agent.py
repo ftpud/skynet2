@@ -518,7 +518,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    config_path = f"agents/{args.agent}.yaml"
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(script_dir, "agents", f"{args.agent}.yaml")
     if not os.path.isfile(config_path):
         print(f"Error: config not found → {config_path}")
         sys.exit(1)
