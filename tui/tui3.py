@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import json
+import os
 import re
+import sys
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -17,6 +19,7 @@ LOG_DIR = Path("./logs")
 REFRESH_SECONDS = 2
 LOCAL_TZ = datetime.now().astimezone().tzinfo
 START_TIME = datetime.now().astimezone(LOCAL_TZ).replace(second=0, microsecond=0)
+SELF_PATH = Path(__file__).resolve()
 
 
 def parse_ts(value):
@@ -193,10 +196,8 @@ def build_tree_panel(sessions):
 
     file_to_session = {s["file"]: s for s in sessions}
 
-    # Only top-level parents (depth 0) as roots
     roots = [s for s in sessions if int(s.get("depth", 0)) == 0]
 
-    # Latest parent execution on top (sorted by last_ts descending)
     ordered_roots = sorted(
         roots,
         key=lambda s: s.get("last_ts") or s.get("start_ts") or datetime.min.replace(tzinfo=LOCAL_TZ),
@@ -224,7 +225,6 @@ def build_tree_panel(sessions):
                 step_label = f"step {step_no}: run_agent → {child_agent}"
                 step_node = tree_node.add(step_label)
 
-                # Extract child log file from the run_agent result string (exactly as it appears in your logs)
                 result_str = str(st.get("result") or "")
                 match = re.search(r"log file\s+→\s+([^\n]+)", result_str)
                 child_sess = None
@@ -321,12 +321,28 @@ def build_view():
     return layout
 
 
+def _self_signature(path: Path):
+    try:
+        st = path.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except Exception:
+        return None
+
+
+def _restart_self():
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
 def main():
     console = Console()
+    sig = _self_signature(SELF_PATH)
     with Live(build_view(), console=console, refresh_per_second=4, screen=True) as live:
         import time
         while True:
             time.sleep(REFRESH_SECONDS)
+            new_sig = _self_signature(SELF_PATH)
+            if new_sig is not None and sig is not None and new_sig != sig:
+                _restart_self()
             live.update(build_view())
 
 
