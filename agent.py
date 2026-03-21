@@ -279,24 +279,101 @@ SAFETY:
 """
 
     def _extract_json(self, text: str) -> dict | None:
-        # Remove common markdown fences that appear despite json mode
-        text = re.sub(r'^```json\s*|\s*```$', '', text.strip(), flags=re.MULTILINE | re.IGNORECASE)
+        """
+        Robust JSON extractor that handles:
+        - Markdown code fences (```json ... ``` or ``` ... ```)
+        - Leading/trailing garbage text
+        - Extra symbols or text AFTER the closing brace
+        - Multiple JSON objects in one response (returns first valid action object)
+        - Escaped or malformed unicode sequences
+        - Trailing commas inside objects (best-effort fix)
+        """
+        # 1. Strip markdown fences (```json ... ``` or ``` ... ```)
+        text = re.sub(r'```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'```', '', text)
         text = text.strip()
 
         decoder = json.JSONDecoder()
 
-        # Try from each JSON object start and return the first object that fully parses.
-        # This is robust to extra pre/post text and braces inside JSON strings.
+        # 2. Find every '{' and try raw_decode from that position.
+        #    raw_decode stops exactly at the end of the first complete JSON value,
+        #    so trailing garbage (text, extra braces, symbols) is ignored.
         starts = [i for i, ch in enumerate(text) if ch == '{']
+        candidates: list[dict] = []
         for start in starts:
             try:
                 obj, _end = decoder.raw_decode(text[start:])
-                if isinstance(obj, dict):
+                if isinstance(obj, dict) and "action" in obj:
+                    # Prefer objects that look like agent actions
                     return obj
+                if isinstance(obj, dict):
+                    candidates.append(obj)
             except json.JSONDecodeError:
-                continue
+                pass
 
-        return None
+        # 3. Return first dict candidate even without "action" key
+        if candidates:
+            return candidates[0]
+
+        # 4. Best-effort repair: remove trailing commas before } or ]
+        #    then retry the scan.
+        repaired = re.sub(r',\s*([}\]])', r'\1', text)
+        if repaired != text:
+            starts = [i for i, ch in enumerate(repaired) if ch == '{']
+            for start in starts:
+                try:
+                    obj, _end = decoder.raw_decode(repaired[start:])
+                    if isinstance(obj, dict):
+                        return obj
+                except json.JSONDecodeError:
+                    pass
+
+        # 5. Last resort: grab the largest {...} block via brace matching and parse it
+        best: dict | None = None
+        best_len = 0
+        depth = 0
+        in_string = False
+        escape = False
+        block_start: int | None = None
+
+        for i, ch in enumerate(text):
+            if escape:
+                escape = False
+                continue
+            if ch == '\\' and in_string:
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == '{':
+                if depth == 0:
+                    block_start = i
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0 and block_start is not None:
+                    block = text[block_start:i + 1]
+                    if len(block) > best_len:
+                        try:
+                            obj = json.loads(block)
+                            if isinstance(obj, dict):
+                                best = obj
+                                best_len = len(block)
+                        except json.JSONDecodeError:
+                            # Try repairing trailing commas in this block
+                            try:
+                                obj = json.loads(re.sub(r',\s*([}\]])', r'\1', block))
+                                if isinstance(obj, dict):
+                                    best = obj
+                                    best_len = len(block)
+                            except json.JSONDecodeError:
+                                pass
+                    block_start = None
+
+        return best
 
     def _run_agent(self, params: dict, step: int) -> str:
         if self.depth + 1 > self.max_depth:

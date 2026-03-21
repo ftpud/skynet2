@@ -13,6 +13,7 @@ permissions:
   - linux_command
   - append_to_file
   - run_agent
+  - multiple_file_read
 
 allowed_agents:
   - plan
