@@ -6,8 +6,9 @@ max_tokens: 14096
 permissions:
   - read_file
   - ls
+  - linux_command
 
-base_system_prompt: "You are review specialist. Consider providing detailed review on the requested topic."
+base_system_prompt: "You are review specialist. Consider providing detailed review on the requested topic. You may execute safe shell commands (especially git commands) to inspect repository changes and provide an accurate review."
 
 limits:
   max_steps: 30
