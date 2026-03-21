@@ -40,6 +40,8 @@ class Agent:
         self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self.history: list[dict] = []
         self.recent_actions: list[dict] = []        # for loop detection
+        self.session_tokens_in = 0
+        self.session_tokens_out = 0
 
         # Load limits (prefer config → globals)
         limits = config.get("limits", {})
@@ -53,6 +55,7 @@ class Agent:
         os.makedirs("logs", exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_path = f"logs/{agent_name}_{ts}.jsonl"
+        self._log_session_start()
 
         self.command_info, self.command_handlers = self._load_commands()
         self.agent_info = self._load_agents()
@@ -135,10 +138,46 @@ class Agent:
 
     def _log(self, step: int, action: str, parameters: dict, result: str):
         entry = {
+            "type": "step",
             "step": step,
             "action": action,
             "parameters": parameters,
             "result": result[:500] + "…" if len(result) > 500 else result,
+            "timestamp": datetime.now().isoformat()
+        }
+        try:
+            with open(self.log_path, "a", encoding="utf-8") as f:
+                json.dump(entry, f, ensure_ascii=False)
+                f.write("\n")
+        except:
+            pass
+
+    def _log_session_start(self):
+        entry = {
+            "type": "session_start",
+            "agent": self.agent_name,
+            "model": self.model,
+            "depth": self.depth,
+            "timestamp": datetime.now().isoformat()
+        }
+        try:
+            with open(self.log_path, "a", encoding="utf-8") as f:
+                json.dump(entry, f, ensure_ascii=False)
+                f.write("\n")
+        except:
+            pass
+
+    def _log_session_end(self):
+        total = self.session_tokens_in + self.session_tokens_out
+        entry = {
+            "type": "session_end",
+            "agent": self.agent_name,
+            "model": self.model,
+            "tokens": {
+                "inbound": self.session_tokens_in,
+                "outbound": self.session_tokens_out,
+                "total": total
+            },
             "timestamp": datetime.now().isoformat()
         }
         try:
@@ -332,15 +371,17 @@ SAFETY:
                         max_output_tokens=self.config.get("max_tokens", 4096),
                     ) as stream:
 
-                    
-
                         for event in stream:
-                                if event.type == "response.output_text.delta":
-                                    if self.verbose:
-                                        print(event.delta, end="", flush=True)
-                                    full_response += event.delta
+                            if event.type == "response.output_text.delta":
+                                if self.verbose:
+                                    print(event.delta, end="", flush=True)
+                                full_response += event.delta
 
-                        
+                        final_response = stream.get_final_response()
+                        usage = getattr(final_response, "usage", None)
+                        if usage:
+                            self.session_tokens_in += int(getattr(usage, "input_tokens", 0) or 0)
+                            self.session_tokens_out += int(getattr(usage, "output_tokens", 0) or 0)
 
                 except Exception as e:
                     if self.verbose:
@@ -365,6 +406,7 @@ SAFETY:
                     print(" → Parsing failed after all retries")
                 self._log(step, "parse_failure", {}, "Max retries reached")
                 print("ERROR: Could not parse valid JSON after retries.")
+                self._log_session_end()
                 return
 
             action = parsed.get("action")
@@ -387,6 +429,7 @@ SAFETY:
                 if self.verbose:
                     print(" → Loop detected — forcing final answer")
                 print("Agent appears stuck in loop. Terminating.")
+                self._log_session_end()
                 return
 
             if action == "final_answer":
@@ -429,6 +472,7 @@ SAFETY:
 
                 print(content)
                 self._log(step, "final_answer", {}, content)
+                self._log_session_end()
                 return
 
             elif action == "command":
