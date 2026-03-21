@@ -27,17 +27,10 @@ MAX_STEPS = 30
 MAX_RETRIES_PER_STEP = 3
 MAX_OUTPUT_CHARS = 300000
 MAX_CONTEXT_MESSAGES = 20
+MAX_OBSERVATION_HISTORY_CHARS = 1200  # ~300 tokens
 MAX_AGENT_DEPTH = 3
 MAX_CHILD_AGENTS = 5
 CHILD_AGENT_TIMEOUT = 600      # seconds
-
-# ── Observation truncation ───────────────────────────────────────────────────
-# Large command outputs are trimmed before being stored in history so they are
-# not re-sent verbatim on every subsequent step (biggest single token saving).
-# The full output is still shown in verbose mode and written to the log.
-OBS_HISTORY_LIMIT = 800        # chars — store full text only when below this
-OBS_SUMMARY_HEAD  = 300        # chars kept from the START of a large obs
-OBS_SUMMARY_TAIL  = 200        # chars kept from the END   of a large obs
 
 
 class Agent:
@@ -231,7 +224,7 @@ class Agent:
             if name not in self.command_info:
                 continue
             info = self.command_info[name]
-            cmd_list += f"• {name}\n  {info['description']}\n  Example: {info['usage_example']}\n\n"
+            cmd_list += f"• {name} — {info['description']}\n"
 
         allowed_agents_list = ""
         allowed_agents = self.config.get("allowed_agents", [])
@@ -239,7 +232,7 @@ class Agent:
             info = self.agent_info.get(name)
             if not info:
                 continue
-            allowed_agents_list += f"• {name}\n  {info['description']}\n\n"
+            allowed_agents_list += f"• {name} — {info['description']}\n"
 
         return f"""You are a {role} agent.
 
@@ -463,6 +456,14 @@ SAFETY:
                 int(getattr(usage, "output_tokens", 0) or 0),
             )
 
+    def _compress_observation(self, obs: str, command_name: str) -> str:
+        if len(obs) <= MAX_OBSERVATION_HISTORY_CHARS:
+            return obs
+        head = obs[:600]
+        tail = obs[-300:]
+        removed = len(obs) - len(head) - len(tail)
+        return f"{head}\n... [truncated {removed} chars for context efficiency] ...\n{tail}"
+
     def _call_model(self, messages: list[dict]) -> tuple[str, int, int]:
         temperature = self.config.get("temperature", 0.0 if self._is_codex() else 0.7)
         if self._is_codex():
@@ -542,7 +543,7 @@ SAFETY:
         # Retry with expanding max_tokens window on truncation
         claude_max_tokens = max_tokens
         MAX_CLAUDE_TOKENS = max_tokens
-        INITIAL_CLAUDE_TOKENS = min(10000, claude_max_tokens)
+        INITIAL_CLAUDE_TOKENS = min(40000, claude_max_tokens)
         claude_max_tokens = INITIAL_CLAUDE_TOKENS
         claude_attempt = 0
         MAX_CLAUDE_RETRIES = 4
@@ -554,12 +555,89 @@ SAFETY:
             in_tokens, out_tokens = 0, 0
             stop_reason = None
 
+            system_block = [
+                {
+                    "type": "text",
+                    "text": system_text,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+
             with self.client.messages.stream(
                 model=self.model,
-                system=system_text,
+                system=system_block,
                 messages=claude_messages,
                 temperature=temperature,
                 max_tokens=claude_max_tokens,
+                #betas=["prompt-caching-2024-07-31"],
+                #stop_sequences=["\n\n"],
+            ) as stream:
+                for text in stream.text_stream:
+                    if self.verbose and text:
+                        print(text, end="", flush=True)
+                    full_response += text
+                    parsed_early = self._extract_json(full_response)
+                    if parsed_early is not None:
+                        # Force-close the HTTP stream immediately — no need to wait
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass
+                        break
+
+            # Final usage + stop reason (works for both early and normal completion)
+            try:
+                final_msg = stream.get_final_message()
+                usage = getattr(final_msg, "usage", None)
+                if usage is not None:
+                    in_tokens, out_tokens = self._extract_usage(usage, "claude")
+                stop_reason = getattr(final_msg, "stop_reason", None)
+            except Exception:
+                pass
+
+            if parsed_early is not None:
+                return json.dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
+            return full_response, in_tokens, out_tokens
+
+        # ── Claude streaming ─────────────────────────────────────────────
+        system_text = ""
+        claude_messages = []
+        for m in messages:
+            if m["role"] == "system":
+                system_text = m["content"]
+            else:
+                claude_messages.append(m)
+
+        # Retry with expanding max_tokens window on truncation
+        claude_max_tokens = max_tokens
+        MAX_CLAUDE_TOKENS = max_tokens
+        INITIAL_CLAUDE_TOKENS = min(40000, claude_max_tokens)
+        claude_max_tokens = INITIAL_CLAUDE_TOKENS
+        claude_attempt = 0
+        MAX_CLAUDE_RETRIES = 4
+
+        while claude_attempt < MAX_CLAUDE_RETRIES:
+            claude_attempt += 1
+            full_response = ""
+            parsed_early = None
+            in_tokens, out_tokens = 0, 0
+            stop_reason = None
+
+            system_block = [
+                {
+                    "type": "text",
+                    "text": system_text,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+
+            with self.client.messages.stream(
+                model=self.model,
+                system=system_block,
+                messages=claude_messages,
+                temperature=temperature,
+                max_tokens=claude_max_tokens,
+                #betas=["prompt-caching-2024-07-31"],
                 #stop_sequences=["\n\n"],
             ) as stream:
                 for text in stream.text_stream:
@@ -600,7 +678,7 @@ SAFETY:
 
             # If truncated, expand the token window and retry
             if stop_reason == "max_tokens" and claude_max_tokens < MAX_CLAUDE_TOKENS:
-                new_limit = min(claude_max_tokens * 4, MAX_CLAUDE_TOKENS)
+                new_limit = min(claude_max_tokens * 2, MAX_CLAUDE_TOKENS)
                 if self.verbose:
                     print(f"   [claude] truncated at {claude_max_tokens} tokens → retrying with {new_limit}")
                 claude_max_tokens = new_limit
@@ -738,17 +816,9 @@ SAFETY:
 
                 obs = obs[:self.max_output_chars] + "…" if len(obs) > self.max_output_chars else obs
 
-                if len(obs) <= OBS_HISTORY_LIMIT:
-                    obs_for_history = obs
-                else:
-                    obs_for_history = (
-                        obs[:OBS_SUMMARY_HEAD]
-                        + f"\n…[truncated, {len(obs)} chars total, showing head+tail]…\n"
-                        + obs[-OBS_SUMMARY_TAIL:]
-                    )
-
                 self.history.append({"role": "assistant", "content": json.dumps(parsed)})
-                self.history.append({"role": "user", "content": f"Observation: {obs_for_history}"})
+                compressed_obs = self._compress_observation(obs, name)
+                self.history.append({"role": "user", "content": f"Observation: {compressed_obs}"})
 
                 # <<< NEW: skip _log for run_agent (already logged above) >>>
                 if name != "run_agent":

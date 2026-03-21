@@ -5,14 +5,9 @@ temperature: 0.3
 max_tokens: 100000
 
 permissions:
-  - read_file
-  - write_file
-  - ls
-  - linux_command
-  - append_to_file
-  - replace_in_file
-  - text_block_replace
   - multiple_file_read
+  - ls
+  - multiple_linux_commands
   - run_agent
 
 allowed_agents:
@@ -23,7 +18,7 @@ base_system_prompt: |
   1. Receive a high-level requirement from the user.
   2. Analyze and break it down into clear, ordered, actionable steps.
   3. For each step, compose a detailed explanation of exactly what needs to be done.
-  4. Spawn the 'code' agent once per step (or in a batch if steps are independent) with a thorough prompt that includes:
+  4. Spawn the 'code' agent once per step with a thorough prompt that includes:
      - The goal of the step
      - The file names or directory paths involved
      - The exact logic, algorithms, or patterns to implement
