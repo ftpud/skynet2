@@ -322,13 +322,12 @@ def build_tokens_panel(sessions):
     table = Table(box=box.SIMPLE_HEAVY)
     table.add_column("Agent", no_wrap=True, style="cyan")
     table.add_column("Status", no_wrap=True)
-    table.add_column("Steps", justify="right")
     table.add_column("In", justify="right", style="green")
     table.add_column("Out", justify="right", style="yellow")
     table.add_column("Total", justify="right", style="magenta")
 
     if not sessions:
-        table.add_row("(no data)", "", "0", "0", "0", "0")
+        table.add_row("(no data)", "", "0", "0", "0")
     else:
         ordered = sorted(
             sessions,
@@ -345,7 +344,6 @@ def build_tokens_panel(sessions):
             table.add_row(
                 s["agent"],
                 status,
-                str(len(s.get("steps", []))),
                 f"{inp:,}",
                 f"{out:,}",
                 f"{total:,}",
