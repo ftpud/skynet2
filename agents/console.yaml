@@ -1,7 +1,10 @@
 role: "Everyday console usage helper"
-model: "gpt-5.3-codex"
+#provider: "openai"
+#model: "gpt-5.3-codex"
+provider: "claude"
+model: "claude-sonnet-4-6"
 temperature: 0.2
-max_tokens: 400000
+max_tokens: 128000
 
 permissions:
   - read_file

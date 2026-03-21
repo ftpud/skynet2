@@ -15,6 +15,10 @@ import time
 from datetime import datetime
 import yaml
 from openai import OpenAI
+try:
+    from anthropic import Anthropic
+except Exception:
+    Anthropic = None
 
 # ───────────────────────────────────────────────
 #  Global limits (can be overridden in config)
@@ -29,15 +33,24 @@ CHILD_AGENT_TIMEOUT = 600      # seconds
 
 
 class Agent:
-    def __init__(self, config: dict, model: str, depth: int, agent_name: str, verbose: bool = False, log_path: str | None = None):
+    def __init__(self, config: dict, model: str, depth: int, agent_name: str, verbose: bool = False, log_path: str | None = None, provider: str = "openai"):
         self.config = config
         self.model = model
         self.depth = depth
         self.agent_name = agent_name
         self.verbose = verbose
         self.spawned_children = 0
+        self.provider = (provider or "openai").lower()
 
-        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        if self.provider == "openai":
+            self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        elif self.provider == "claude":
+            if Anthropic is None:
+                raise RuntimeError("Anthropic SDK is not installed. Install 'anthropic' to use provider=claude.")
+            self.client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        else:
+            raise ValueError(f"Unsupported provider: {self.provider}")
+
         self.history: list[dict] = []
         self.recent_actions: list[dict] = []        # for loop detection
         self.session_tokens_in = 0
@@ -69,7 +82,7 @@ class Agent:
         self.system_prompt = self._build_system_prompt()
 
         if self.verbose:
-            print(f"[START] Agent '{agent_name}' | depth={depth} | model={model}")
+            print(f"[START] Agent '{agent_name}' | depth={depth} | provider={self.provider} | model={model}")
             print(f"   config role  : {config.get('role','<unset>')}")
             print(f"   permissions  : {', '.join(config.get('permissions',[])) or '<none>'}")
             print(f"   max steps    : {self.max_steps}")
@@ -152,6 +165,7 @@ class Agent:
             "result": result[:500] + "…" if len(result) > 500 else result,
             "timestamp": datetime.now().isoformat(),
             "agent": self.agent_name,
+            "provider": self.provider,
             "model": self.model,
             "depth": self.depth
         }
@@ -166,6 +180,7 @@ class Agent:
         entry = {
             "type": "session_start",
             "agent": self.agent_name,
+            "provider": self.provider,
             "model": self.model,
             "depth": self.depth,
             "timestamp": datetime.now().isoformat()
@@ -182,6 +197,7 @@ class Agent:
         entry = {
             "type": "session_end",
             "agent": self.agent_name,
+            "provider": self.provider,
             "model": self.model,
             "tokens": {
                 "inbound": self.session_tokens_in,
@@ -312,7 +328,8 @@ SAFETY:
             "--agent", child_agent,
             "--prompt", child_prompt,
             "--depth", str(self.depth + 1),
-            "--log-path", child_log_path,          # ← pass exact path
+            "--log-path", child_log_path,
+            "--provider-override", self.provider,
         ]
         if self.verbose:
             cmd += ["--verbose"]
@@ -364,6 +381,54 @@ SAFETY:
         prompt += "ASSISTANT:\n"
         return prompt
 
+    def _call_model(self, messages: list[dict]) -> tuple[str, int, int]:
+        if self.provider == "openai":
+            full_response = ""
+            with self.client.responses.stream(
+                model=self.model,
+                input=messages,
+                temperature=self.config.get("temperature", 0.7),
+                max_output_tokens=self.config.get("max_tokens", 4096),
+            ) as stream:
+                for event in stream:
+                    if event.type == "response.output_text.delta":
+                        if self.verbose:
+                            print(event.delta, end="", flush=True)
+                        full_response += event.delta
+
+                final_response = stream.get_final_response()
+                usage = getattr(final_response, "usage", None)
+                in_tokens = int(getattr(usage, "input_tokens", 0) or 0) if usage else 0
+                out_tokens = int(getattr(usage, "output_tokens", 0) or 0) if usage else 0
+                return full_response, in_tokens, out_tokens
+
+        system_text = self.system_prompt
+        claude_messages = [m for m in messages if m.get("role") != "system"]
+        # ── Claude streaming ─────────────────────────────────────────────
+        full_response = ""
+        input_tokens = 0
+        output_tokens = 0
+
+        with self.client.messages.stream(
+            model=self.model,
+            system=system_text,
+            messages=claude_messages,
+            temperature=self.config.get("temperature", 0.7),
+            max_tokens=self.config.get("max_tokens", 4096),
+        ) as stream:
+            for text in stream.text_stream:
+                if self.verbose and text:
+                    print(text, end="", flush=True)
+                full_response += text
+
+            # Get usage after stream is done
+            message = stream.get_final_message()   # or stream.final_message depending on SDK version
+            usage = getattr(message, "usage", None)
+            input_tokens  = getattr(usage, "input_tokens",  0) if usage else 0
+            output_tokens = getattr(usage, "output_tokens", 0) if usage else 0
+
+        return full_response, input_tokens, output_tokens
+
     def run(self, initial_prompt: str):
         self.history = [{"role": "user", "content": initial_prompt}]
         step = 0
@@ -371,7 +436,7 @@ SAFETY:
         while step < self.max_steps:
             step += 1
             if self.verbose:
-                print(f"[{step:2d}] Calling {self.model} …")
+                print(f"[{step:2d}] Calling {self.provider}:{self.model} …")
 
             messages = [
                 {"role": "system", "content": self.system_prompt}
@@ -382,29 +447,10 @@ SAFETY:
                 if self.verbose and attempt > 1:
                     print(f"   retry {attempt}/{MAX_RETRIES_PER_STEP}")
 
-                full_response = ""
-
                 try:
-                
-                    with self.client.responses.stream(
-                        model=self.model,
-                        input=messages,
-                        temperature=self.config.get("temperature", 0.7),
-                        max_output_tokens=self.config.get("max_tokens", 4096),
-                    ) as stream:
-
-                        for event in stream:
-                            if event.type == "response.output_text.delta":
-                                if self.verbose:
-                                    print(event.delta, end="", flush=True)
-                                full_response += event.delta
-
-                        final_response = stream.get_final_response()
-                        usage = getattr(final_response, "usage", None)
-                        if usage:
-                            self.session_tokens_in += int(getattr(usage, "input_tokens", 0) or 0)
-                            self.session_tokens_out += int(getattr(usage, "output_tokens", 0) or 0)
-
+                    full_response, in_tokens, out_tokens = self._call_model(messages)
+                    self.session_tokens_in += in_tokens
+                    self.session_tokens_out += out_tokens
                 except Exception as e:
                     if self.verbose:
                         print(f"   API error: {e}")
@@ -536,8 +582,10 @@ if __name__ == "__main__":
     parser.add_argument("--agent",   required=True,  help="agent config name (agents/<name>.yaml)")
     parser.add_argument("--prompt",  required=True,  help="initial user prompt / task")
     parser.add_argument("--model",   default=None,   help="override model name")
+    parser.add_argument("--provider", default=None, choices=["openai", "claude"], help="LLM provider override")
+    parser.add_argument("--provider-override", default=None, choices=["openai", "claude"], help="force provider for all agents (overrides CLI and config)")
     parser.add_argument("--depth",   type=int, default=0, help="current hierarchy depth (internal)")
-    parser.add_argument("--log-path", default=None, help="internal: exact log file path (for child agents)")  # ← NEW
+    parser.add_argument("--log-path", default=None, help="internal: exact log file path (for child agents)")
     parser.add_argument("-v", "--verbose", action="store_true", help="show detailed progress")
 
     args = parser.parse_args()
@@ -560,8 +608,16 @@ if __name__ == "__main__":
         print("Error: model must be set in config or via --model")
         sys.exit(1)
 
-    if not os.getenv("OPENAI_API_KEY"):
-        print("Error: OPENAI_API_KEY environment variable is required")
+    provider = (args.provider_override or args.provider or config.get("provider") or "openai").lower()
+    if provider not in {"openai", "claude"}:
+        print("Error: provider must be 'openai' or 'claude'")
+        sys.exit(1)
+
+    if provider == "openai" and not os.getenv("OPENAI_API_KEY"):
+        print("Error: OPENAI_API_KEY environment variable is required for provider=openai")
+        sys.exit(1)
+    if provider == "claude" and not os.getenv("ANTHROPIC_API_KEY"):
+        print("Error: ANTHROPIC_API_KEY environment variable is required for provider=claude")
         sys.exit(1)
 
     agent = Agent(
@@ -570,7 +626,8 @@ if __name__ == "__main__":
         depth=args.depth,
         agent_name=args.agent,
         verbose=args.verbose,
-        log_path=args.log_path
+        log_path=args.log_path,
+        provider=provider,
     )
 
     agent.run(args.prompt)

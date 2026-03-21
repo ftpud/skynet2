@@ -1,4 +1,5 @@
 role: "Coding specialist"
+provider: "openai"
 model: "gpt-5.3-codex"
 temperature: 0.2
 max_tokens: 400000

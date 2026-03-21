@@ -1,4 +1,5 @@
 role: "Planning specialist"
+provider: "openai"
 model: "gpt-5.4-mini"
 temperature: 0.0
 max_tokens: 400000
