@@ -406,7 +406,7 @@ SAFETY:
             "--prompt", child_prompt,
             "--depth", str(self.depth + 1),
             "--log-path", child_log_path,
-            "--provider-override", self.provider,
+          #  "--provider-override", self.provider,
         ]
         if self.verbose:
             cmd += ["--verbose"]
@@ -441,70 +441,136 @@ SAFETY:
     def _is_codex(self) -> bool:
         return "codex" in self.model.lower()
 
-    def _build_prompt(self, messages: list[dict]) -> str:
-        prompt = ""
-
-        for m in messages:
-            role = m["role"]
-            content = m["content"]
-
-            if role == "system":
-                prompt += f"INSTRUCTIONS:\n{content}\n\n"
-            elif role == "user":
-                prompt += f"USER:\n{content}\n\n"
-            elif role == "assistant":
-                prompt += f"ASSISTANT:\n{content}\n\n"
-
-        prompt += "ASSISTANT:\n"
-        return prompt
+    def _extract_usage(self, usage, api_type: str) -> tuple[int, int]:
+        if usage is None:
+            return (0, 0)
+        if api_type == "chat_completions":
+            return (
+                int(getattr(usage, "prompt_tokens", 0) or 0),
+                int(getattr(usage, "completion_tokens", 0) or 0),
+            )
+        else:  # responses API or claude
+            return (
+                int(getattr(usage, "input_tokens", 0) or 0),
+                int(getattr(usage, "output_tokens", 0) or 0),
+            )
 
     def _call_model(self, messages: list[dict]) -> tuple[str, int, int]:
-        if self.provider == "openai":
+        temperature = self.config.get("temperature", 0.0 if self._is_codex() else 0.7)
+        if self._is_codex():
+            default_max = 128000
+        elif self.provider == "claude":
+            default_max = 8192
+        else:
+            default_max = 4096
+        max_tokens = self.config.get("max_tokens", default_max)
+
+        if self.provider == "openai" and self._is_codex():
+            # ── OpenAI Responses API (Codex / reasoning models) ──────────
             full_response = ""
+            parsed_early = None
             with self.client.responses.stream(
                 model=self.model,
                 input=messages,
-                temperature=self.config.get("temperature", 0.7),
-                max_output_tokens=self.config.get("max_tokens", 4096),
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+                text={"format": {"type": "json_object"}},
             ) as stream:
                 for event in stream:
                     if event.type == "response.output_text.delta":
                         if self.verbose:
                             print(event.delta, end="", flush=True)
                         full_response += event.delta
+                        parsed_early = self._extract_json(full_response)
+                        if parsed_early is not None:
+                            break
 
                 final_response = stream.get_final_response()
                 usage = getattr(final_response, "usage", None)
-                in_tokens = int(getattr(usage, "input_tokens", 0) or 0) if usage else 0
-                out_tokens = int(getattr(usage, "output_tokens", 0) or 0) if usage else 0
+                in_tokens, out_tokens = self._extract_usage(usage, "responses")
+                if parsed_early is not None:
+                    return json.dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
                 return full_response, in_tokens, out_tokens
 
-        system_text = self.system_prompt
-        claude_messages = [m for m in messages if m.get("role") != "system"]
-        # ── Claude streaming ─────────────────────────────────────────────
-        full_response = ""
-        input_tokens = 0
-        output_tokens = 0
+        elif self.provider == "openai":
+            # ── OpenAI Chat Completions API (standard GPT models) ────────
+            full_response = ""
+            parsed_early = None
+            stream = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_completion_tokens=max_tokens,
+                response_format={"type": "json_object"},
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+            usage = None
+            for chunk in stream:
+                if hasattr(chunk, "usage") and chunk.usage is not None:
+                    usage = chunk.usage
+                delta = chunk.choices[0].delta.content if chunk.choices else None
+                delta = delta or ""
+                if self.verbose and delta:
+                    print(delta, end="", flush=True)
+                full_response += delta
+                parsed_early = self._extract_json(full_response)
+                if parsed_early is not None:
+                    break
+            in_tokens, out_tokens = self._extract_usage(usage, "chat_completions")
+            if parsed_early is not None:
+                return json.dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
+            return full_response, in_tokens, out_tokens
 
+        # ── Claude streaming ─────────────────────────────────────────────
+        system_text = ""
+        claude_messages = []
+        for m in messages:
+            if m["role"] == "system":
+                system_text = m["content"]
+            else:
+                claude_messages.append(m)
+
+        full_response = ""
+        parsed_early = None
+        in_tokens, out_tokens = 0, 0
         with self.client.messages.stream(
             model=self.model,
             system=system_text,
             messages=claude_messages,
-            temperature=self.config.get("temperature", 0.7),
-            max_tokens=self.config.get("max_tokens", 4096),
+            temperature=temperature,
+            max_tokens=max_tokens,
         ) as stream:
             for text in stream.text_stream:
                 if self.verbose and text:
                     print(text, end="", flush=True)
                 full_response += text
+                parsed_early = self._extract_json(full_response)
+                if parsed_early is not None:
+                    # Cancel remaining stream — do NOT call get_final_message()
+                    # to avoid waiting for the full response to complete.
+                    # Usage will be approximate (input tokens only from stream).
+                    try:
+                        usage = getattr(stream, "_MessageStream__message", None)
+                        if usage is None:
+                            # Try to get partial usage from the underlying response
+                            raw = getattr(stream, "response", None)
+                            usage = getattr(raw, "usage", None) if raw else None
+                        if usage is not None:
+                            in_tokens, out_tokens = self._extract_usage(usage, "claude")
+                    except Exception:
+                        pass
+                    break
 
-            # Get usage after stream is done
-            message = stream.get_final_message()   # or stream.final_message depending on SDK version
-            usage = getattr(message, "usage", None)
-            input_tokens  = getattr(usage, "input_tokens",  0) if usage else 0
-            output_tokens = getattr(usage, "output_tokens", 0) if usage else 0
+            if parsed_early is None:
+                # Stream exhausted normally — get final message for usage
+                message = stream.get_final_message()
+                usage = getattr(message, "usage", None)
+                in_tokens, out_tokens = self._extract_usage(usage, "claude")
 
-        return full_response, input_tokens, output_tokens
+        if parsed_early is not None:
+            return json.dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
+        return full_response, in_tokens, out_tokens
 
     def run(self, initial_prompt: str):
         self.history = [{"role": "user", "content": initial_prompt}]

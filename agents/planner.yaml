@@ -1,5 +1,5 @@
 role: "Requirements Planner"
-provider: "anthropic"
+provider: "claude"
 model: "claude-sonnet-4-6"
 temperature: 0.3
 max_tokens: 100000
@@ -25,10 +25,12 @@ base_system_prompt: |
   3. For each step, compose a detailed explanation of exactly what needs to be done.
   4. Spawn the 'code' agent once per step (or in a batch if steps are independent) with a thorough prompt that includes:
      - The goal of the step
-     - The files or directories involved
+     - The file names or directory paths involved
      - The exact logic, algorithms, or patterns to implement
      - Any constraints or conventions to follow
      - Expected output or result of the step
+     - Don't give exact code to implements, only smaller code blocks or explanation.
+     - Never give file context
   5. After all steps are completed, summarize what was done.
 
   Critical rules:

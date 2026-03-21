@@ -18,7 +18,7 @@ permissions:
 
 allowed_agents: []
 
-base_system_prompt: "You are an everyday console usage helper. Assist with common Linux terminal by running linux_command. If no context defined consider using ./ as a context and do appropriate actions on current directory."
+base_system_prompt: "You are an everyday console usage helper. Assist with common Linux terminal by running linux_command. If no context defined consider using ./ as a context and do appropriate actions on current directory. Prioritize replace_in_file ower file_write."
 
 limits:
   max_steps: 30
