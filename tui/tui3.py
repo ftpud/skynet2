@@ -206,7 +206,7 @@ def build_tree_panel(sessions):
     def make_label(s):
         depth = int(s.get("depth", 0) or 0)
         status = "[green]done[/green]" if s.get("end_ts") else "[yellow]running[/yellow]"
-        return f"{s['agent']} ({s['model']}) d={depth} {status}"
+        return f"{s['agent']} d={depth} {status}"
 
     def add_steps_and_subcalls(tree_node, sess, file_to_session, visited):
         sess_file = sess.get("file")
@@ -255,13 +255,11 @@ def build_tree_panel(sessions):
 def build_tokens_panel(sessions):
     table = Table(box=box.SIMPLE_HEAVY)
     table.add_column("Agent", no_wrap=True, style="cyan")
-    table.add_column("Model", no_wrap=True, style="blue")
     table.add_column("Status", no_wrap=True)
     table.add_column("Steps", justify="right")
-    table.add_column("Last", no_wrap=True, style="magenta")
 
     if not sessions:
-        table.add_row("(no data)", "", "", "0", "")
+        table.add_row("(no data)", "", "0")
     else:
         ordered = sorted(
             sessions,
@@ -270,33 +268,43 @@ def build_tokens_panel(sessions):
         )
         for s in ordered[:20]:
             status = "running" if s.get("end_ts") is None else "done"
-            last_ts = s.get("last_ts") or s.get("start_ts")
-            last_str = last_ts.astimezone(LOCAL_TZ).strftime("%H:%M:%S") if last_ts else "-"
-            table.add_row(s["agent"], s["model"], status, str(len(s.get("steps", []))), last_str)
+            table.add_row(s["agent"], status, str(len(s.get("steps", []))))
 
     return Panel(table, title="Current/Recent execution", box=box.SIMPLE)
 
 
-def build_chart_panel(buckets, per_model):
+def build_chart_panel(per_model):
     table = Table(box=box.SIMPLE_HEAVY)
     table.add_column("Model", style="cyan", no_wrap=True)
     table.add_column("Total", justify="right", style="magenta")
-    table.add_column("Per-minute usage", style="green")
 
     if not per_model:
-        table.add_row("(no data)", "0", "")
+        table.add_row("(no data)", "0")
     else:
         for model, vals in sorted(per_model.items(), key=lambda kv: sum(kv[1]), reverse=True):
-            table.add_row(model, f"{sum(vals):,}", spark(vals, width=28))
+            table.add_row(model, f"{sum(vals):,}")
+
+    return Panel(table, title="Token totals by model", box=box.SIMPLE)
+
+
+def build_total_usage_panel(buckets, per_model):
+    total_vals = [0] * len(buckets)
+    for vals in per_model.values():
+        for i, v in enumerate(vals):
+            total_vals[i] += v
+
+    chart = spark(total_vals, width=80)
+    total_tokens = sum(total_vals)
 
     minute_labels = [b.astimezone(LOCAL_TZ).strftime("%H:%M") for b in buckets]
     if len(minute_labels) > 8:
         shown = minute_labels[:4] + ["..."] + minute_labels[-4:]
     else:
         shown = minute_labels
-    subtitle = f"per-minute all tokens | {' '.join(shown)}"
 
-    return Panel(table, title="Token chart (bottom)", subtitle=subtitle, box=box.SIMPLE)
+    body = f"Total tokens: {total_tokens:,}\n{chart}"
+    subtitle = f"per-minute total tokens (all models) | {' '.join(shown)}"
+    return Panel(body, title="Per-minute usage (all models)", subtitle=subtitle, box=box.SIMPLE)
 
 
 def build_view():
@@ -307,7 +315,8 @@ def build_view():
     layout.split_column(
         Layout(build_tree_panel(sessions), ratio=6),
         Layout(build_tokens_panel(sessions), ratio=3),
-        Layout(build_chart_panel(buckets, per_model), ratio=3),
+        Layout(build_chart_panel(per_model), ratio=2),
+        Layout(build_total_usage_panel(buckets, per_model), ratio=2),
     )
     return layout
 
