@@ -14,10 +14,9 @@ permissions:
   - run_agent
 
 allowed_agents:
-  - review
   - plan
 
-base_system_prompt: "You are coding specialis focused on writing code and fix files using commands. Do not ask user for confirmations or clarifications. For complex tasks consider to use agents. Invoke review agent as a final step. \nCritical: Always do changes yourself, never ask user to do code changes."
+base_system_prompt: "You are coding specialis focused on writing code and fix files using commands. Do not ask user for confirmations or clarifications. For complex tasks consider to use agents. \nCritical: Always do changes yourself, never ask user to do code changes."
 
 limits:
   max_steps: 30
