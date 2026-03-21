@@ -13,7 +13,7 @@ Fully isolated in execution context
 2. Technology Requirements
 Python 3.11+
 Dependencies:
-openai >= 1.40.0
+openai
 PyYAML
 Standard library only (os, subprocess, json, typing, etc.)
 Environment variable:
@@ -31,12 +31,12 @@ MAX_CHILD_AGENTS = 5
 CHILD_AGENT_TIMEOUT = 60  # seconds
 If any limit is reached, the agent MUST terminate with a final_answer.
 4. CLI Interface
-python agent.py --config config.yaml --prompt "Your task here" [--model gpt-5.4]
+python agent.py --agent agent_name --prompt "Your task here" [--model gpt-5.4]
 Arguments:
---config (required): path to YAML configuration file
+--agent (required): agent name
 --prompt (required): initial user input
 --model (optional): overrides config model
-5. Configuration File (config.yaml)
+5. Agent Configuration File (agents/agent_name.yaml)
 Required structure:
 role: "coder"
 model: "gpt-5.4"
@@ -82,9 +82,9 @@ append_to_file
 linux_command
 run_agent
 ls
-8. Dynamic Command Loading
+8. Dynamic Command and Agents Loading
 At startup:
-Discover all modules in /commands
+Discover all modules in /commands and /agents
 Validate required attributes
 Filter commands based on permissions in config
 Ignore invalid or broken modules safely
@@ -179,7 +179,7 @@ Parameters:
 {
   "role": "reviewer",
   "prompt": "...",
-  "config": "subconfig.yaml"
+  "agent": "agent name"
 }
 Constraints:
 Depth ≤ MAX_AGENT_DEPTH

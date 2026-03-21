@@ -1,0 +1,17 @@
+role: "Coding specialist (fast)"
+model: "gpt-5.3-codex"
+temperature: 0.2
+max_tokens: 4096
+
+permissions:
+  - read_file
+  - write_file
+  - ls
+  
+
+base_system_prompt: ""
+
+limits:
+  max_steps: 30
+  max_depth: 3
+  max_children: 5
