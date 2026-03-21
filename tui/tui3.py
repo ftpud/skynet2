@@ -18,7 +18,8 @@ from rich import box
 LOG_DIR = Path("./logs")
 REFRESH_SECONDS = 2
 LOCAL_TZ = datetime.now().astimezone().tzinfo
-START_TIME = datetime.now().astimezone(LOCAL_TZ).replace(second=0, microsecond=0)
+APP_START_TIME = datetime.now().astimezone(LOCAL_TZ)
+START_TIME = APP_START_TIME.replace(second=0, microsecond=0)
 SELF_PATH = Path(__file__).resolve()
 
 
@@ -151,6 +152,8 @@ def load_data(log_dir: Path, now_local: datetime):
     if end_local < START_TIME:
         end_local = START_TIME
 
+    since_start_exact = APP_START_TIME
+
     total_minutes = int((end_local - START_TIME).total_seconds() // 60) + 1
     buckets_local = [START_TIME + timedelta(minutes=i) for i in range(total_minutes)]
     bucket_index = {b: i for i, b in enumerate(buckets_local)}
@@ -159,10 +162,11 @@ def load_data(log_dir: Path, now_local: datetime):
     per_model_input = defaultdict(int)
     per_model_output = defaultdict(int)
     per_model_total = defaultdict(int)
+    per_model_since_start = defaultdict(int)
     sessions = []
 
     if not log_dir.exists():
-        return buckets_local, per_model, per_model_input, per_model_output, per_model_total, sessions
+        return buckets_local, per_model, per_model_input, per_model_output, per_model_total, per_model_since_start, sessions
 
     for path in sorted(log_dir.rglob("*.jsonl")):
         starts = []
@@ -186,6 +190,10 @@ def load_data(log_dir: Path, now_local: datetime):
                     if total:
                         per_model_total[model] += total
                         session_total += total
+                        if ts is not None:
+                            ts_local_for_since = ts.astimezone(LOCAL_TZ)
+                            if ts_local_for_since >= since_start_exact:
+                                per_model_since_start[model] += total
                     if inp:
                         per_model_input[model] += inp
                         session_input += inp
@@ -233,7 +241,7 @@ def load_data(log_dir: Path, now_local: datetime):
         key=lambda s: s.get("last_ts") or s.get("start_ts") or datetime.min.replace(tzinfo=LOCAL_TZ),
         reverse=True,
     )
-    return buckets_local, per_model, per_model_input, per_model_output, per_model_total, sessions
+    return buckets_local, per_model, per_model_input, per_model_output, per_model_total, per_model_since_start, sessions
 
 
 def build_tree_panel(sessions):
@@ -346,16 +354,17 @@ def build_tokens_panel(sessions):
     return Panel(table, title="Current/Recent execution", box=box.SIMPLE)
 
 
-def build_usage_by_model_table(per_model_input, per_model_output, per_model_total):
+def build_usage_by_model_table(per_model_input, per_model_output, per_model_total, per_model_since_start):
     table = Table(box=box.SIMPLE_HEAVY)
     table.add_column("Model", style="cyan", no_wrap=True)
     table.add_column("In", justify="right", style="green")
     table.add_column("Out", justify="right", style="yellow")
     table.add_column("Total", justify="right", style="magenta")
+    table.add_column("Since start", justify="right", style="bright_magenta")
 
     models = set(per_model_total.keys()) | set(per_model_input.keys()) | set(per_model_output.keys())
     if not models:
-        table.add_row("(no data)", "0", "0", "0")
+        table.add_row("(no data)", "0", "0", "0", "0")
     else:
         rows = []
         for model in models:
@@ -368,7 +377,8 @@ def build_usage_by_model_table(per_model_input, per_model_output, per_model_tota
                 total = inp + out
             rows.append((model, inp, out, total))
         for model, inp, out, total in sorted(rows, key=lambda r: r[3], reverse=True):
-            table.add_row(model, f"{inp:,}", f"{out:,}", f"{total:,}")
+            since_start = int(per_model_since_start.get(model, 0) or 0)
+            table.add_row(model, f"{inp:,}", f"{out:,}", f"{total:,}", f"{since_start:,}")
 
     return Panel(table, title="Token totals by model", box=box.SIMPLE)
 
@@ -395,13 +405,13 @@ def build_total_usage_panel(buckets, per_model):
 
 def build_view():
     now_local = datetime.now().astimezone(LOCAL_TZ)
-    buckets, per_model, per_model_input, per_model_output, per_model_total, sessions = load_data(LOG_DIR, now_local)
+    buckets, per_model, per_model_input, per_model_output, per_model_total, per_model_since_start, sessions = load_data(LOG_DIR, now_local)
 
     layout = Layout()
     layout.split_column(
         Layout(build_tree_panel(sessions), ratio=3),
         Layout(build_tokens_panel(sessions), ratio=1),
-        Layout(build_usage_by_model_table(per_model_input, per_model_output, per_model_total), ratio=1),
+        Layout(build_usage_by_model_table(per_model_input, per_model_output, per_model_total, per_model_since_start), ratio=1),
         
         #Layout(build_total_usage_panel(buckets, per_model), ratio=1),
     )
