@@ -51,10 +51,12 @@ class Agent:
         self.max_output_chars    = MAX_OUTPUT_CHARS
         self.max_context_messages = MAX_CONTEXT_MESSAGES
 
-        # Logging
-        os.makedirs("logs", exist_ok=True)
+        # Logging (always relative to this script directory, not current working directory)
+        self.base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.logs_dir = os.path.join(self.base_dir, "logs")
+        os.makedirs(self.logs_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.log_path = f"logs/{agent_name}_{ts}.jsonl"
+        self.log_path = os.path.join(self.logs_dir, f"{agent_name}_{ts}.jsonl")
         self._log_session_start()
 
         self.command_info, self.command_handlers = self._load_commands()

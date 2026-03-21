@@ -10,6 +10,7 @@ _BLOCKED = [
     "reboot",
     "mkfs",
     ":(){ :|:& };:",
+    
 ]
 
 
@@ -32,7 +33,7 @@ def execute(parameters: dict) -> str:
             shell=True,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=60,
         )
 
         out = (result.stdout or "")
