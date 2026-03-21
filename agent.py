@@ -531,45 +531,77 @@ SAFETY:
             else:
                 claude_messages.append(m)
 
-        full_response = ""
-        parsed_early = None
-        in_tokens, out_tokens = 0, 0
-        with self.client.messages.stream(
-            model=self.model,
-            system=system_text,
-            messages=claude_messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        ) as stream:
-            for text in stream.text_stream:
-                if self.verbose and text:
-                    print(text, end="", flush=True)
-                full_response += text
-                parsed_early = self._extract_json(full_response)
-                if parsed_early is not None:
-                    # Cancel remaining stream — do NOT call get_final_message()
-                    # to avoid waiting for the full response to complete.
-                    # Usage will be approximate (input tokens only from stream).
+        # Retry with expanding max_tokens window on truncation
+        claude_max_tokens = max_tokens
+        MAX_CLAUDE_TOKENS = 8192
+        INITIAL_CLAUDE_TOKENS = min(512, claude_max_tokens)
+        claude_max_tokens = INITIAL_CLAUDE_TOKENS
+        claude_attempt = 0
+        MAX_CLAUDE_RETRIES = 4
+
+        while claude_attempt < MAX_CLAUDE_RETRIES:
+            claude_attempt += 1
+            full_response = ""
+            parsed_early = None
+            in_tokens, out_tokens = 0, 0
+            stop_reason = None
+
+            with self.client.messages.stream(
+                model=self.model,
+                system=system_text,
+                messages=claude_messages,
+                temperature=temperature,
+                max_tokens=claude_max_tokens,
+                #stop_sequences=["\n\n"],
+            ) as stream:
+                for text in stream.text_stream:
+                    if self.verbose and text:
+                        print(text, end="", flush=True)
+                    full_response += text
+                    parsed_early = self._extract_json(full_response)
+                    if parsed_early is not None:
+                        # Force-close the HTTP stream immediately — no need to wait
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass
+                        # Try to grab partial usage
+                        try:
+                            usage = getattr(stream, "_MessageStream__message", None)
+                            if usage is None:
+                                raw = getattr(stream, "response", None)
+                                usage = getattr(raw, "usage", None) if raw else None
+                            if usage is not None:
+                                in_tokens, out_tokens = self._extract_usage(usage, "claude")
+                        except Exception:
+                            pass
+                        break
+
+                if parsed_early is None:
+                    # Stream exhausted normally — get final message for usage + stop_reason
                     try:
-                        usage = getattr(stream, "_MessageStream__message", None)
-                        if usage is None:
-                            # Try to get partial usage from the underlying response
-                            raw = getattr(stream, "response", None)
-                            usage = getattr(raw, "usage", None) if raw else None
-                        if usage is not None:
-                            in_tokens, out_tokens = self._extract_usage(usage, "claude")
+                        message = stream.get_final_message()
+                        usage = getattr(message, "usage", None)
+                        in_tokens, out_tokens = self._extract_usage(usage, "claude")
+                        stop_reason = getattr(message, "stop_reason", None)
                     except Exception:
                         pass
-                    break
 
-            if parsed_early is None:
-                # Stream exhausted normally — get final message for usage
-                message = stream.get_final_message()
-                usage = getattr(message, "usage", None)
-                in_tokens, out_tokens = self._extract_usage(usage, "claude")
+            if parsed_early is not None:
+                return json.dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
 
-        if parsed_early is not None:
-            return json.dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
+            # If truncated, expand the token window and retry
+            if stop_reason == "max_tokens" and claude_max_tokens < MAX_CLAUDE_TOKENS:
+                new_limit = min(claude_max_tokens * 2, MAX_CLAUDE_TOKENS)
+                if self.verbose:
+                    print(f"   [claude] truncated at {claude_max_tokens} tokens → retrying with {new_limit}")
+                claude_max_tokens = new_limit
+                time.sleep(0.3)
+                continue
+
+            # Non-truncation failure — break out and let caller handle
+            break
+
         return full_response, in_tokens, out_tokens
 
     def run(self, initial_prompt: str):
