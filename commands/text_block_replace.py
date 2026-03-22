@@ -1,7 +1,7 @@
 import os
 
 COMMAND_NAME = "text_block_replace"
-DESCRIPTION = "Replace one or more line-range blocks in a UTF-8 text file with safety validation."
+DESCRIPTION = "Replace one or more line-range blocks in a UTF-8 text file with safety validation. Do not use for full file rewrite."
 USAGE_EXAMPLE = '{"action":"command","name":"text_block_replace","parameters":{"path":"notes.txt","blocks":[{"line_range":"10-15","replace_with":"new text","first_block_line":"start marker","last_block_line":"end marker"}]}}'
 
 
@@ -95,8 +95,20 @@ def execute(parameters: dict) -> str:
             if not block_lines:
                 return f"ERROR: blocks[{i}] resolved to empty block"
 
-            actual_first = block_lines[0].rstrip("\r\n").strip()
-            actual_last = block_lines[-1].rstrip("\r\n").strip()
+            first_idx = 0
+            while first_idx < len(block_lines) and block_lines[first_idx].rstrip("\r\n").strip() == "":
+                first_idx += 1
+            if first_idx >= len(block_lines):
+                return f"ERROR: blocks[{i}] contains only empty lines"
+
+            last_idx = len(block_lines) - 1
+            while last_idx >= 0 and block_lines[last_idx].rstrip("\r\n").strip() == "":
+                last_idx -= 1
+            if last_idx < 0:
+                return f"ERROR: blocks[{i}] contains only empty lines"
+
+            actual_first = block_lines[first_idx].rstrip("\r\n").strip()
+            actual_last = block_lines[last_idx].rstrip("\r\n").strip()
 
             if actual_first != first_block_line.strip():
                 return f"ERROR: blocks[{i}] first line mismatch; Actual: [{actual_first}] Provided: [{first_block_line.strip()}]"

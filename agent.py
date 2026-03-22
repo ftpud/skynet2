@@ -189,7 +189,7 @@ class Agent:
                 shell=True,
                 cwd=self.base_dir,
                 env=env,
-                capture_output=True,
+                capture_output=not self.verbose,
                 text=True,
             )
             output = (result.stdout or "") + (result.stderr or "")
@@ -198,10 +198,8 @@ class Agent:
             if output:
                 status += f"\n{output[:400]}"
             self._log(0, f"hook:{hook_name}", {"script": script}, status)
-            if self.verbose_log and self.verbose_log_path:
-                #self._vprint(f"[{hook_name}] {shlex.join([script])}")
-                if output:
-                    self._vprint(output[:400])
+            if self.verbose_log and self.verbose_log_path and output:
+                self._vprint(output[:400])
         except Exception as e:
             self._log(0, f"hook:{hook_name}", {"script": script}, f"ERROR: {e}")
 
