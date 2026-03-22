@@ -18,6 +18,9 @@ permissions:
 allowed_agents:
   - gcode
 
+startup_observe:
+  - cat project.md
+
 hooks:
   on_run_start: |
     if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
