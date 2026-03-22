@@ -99,9 +99,9 @@ def execute(parameters: dict) -> str:
             actual_last = block_lines[-1].rstrip("\r\n").strip()
 
             if actual_first != first_block_line.strip():
-                return f"ERROR: blocks[{i}] first line mismatch"
+                return f"ERROR: blocks[{i}] first line mismatch; Actual: [{actual_first}] Provided: [{first_block_line.strip()}]"
             if actual_last != last_block_line.strip():
-                return f"ERROR: blocks[{i}] last line mismatch"
+                return f"ERROR: blocks[{i}] last line mismatch; Actual: [{actual_last}] Provided: [{last_block_line.strip()}]"
 
             if replace_with and not replace_with.endswith(("\n", "\r")):
                 replace_with += "\n"
