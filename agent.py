@@ -516,7 +516,7 @@ SAFETY:
                 full_response += delta
                 parsed_early = self._extract_json(full_response)
                 if parsed_early is not None:
-                    break
+                    continue
             in_tokens, out_tokens = self._extract_usage(usage, "chat_completions")
             if parsed_early is not None:
                 return json.dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens

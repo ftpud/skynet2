@@ -1,0 +1,31 @@
+role: "Coding specialist"
+provider: "openai"
+model: "gpt-5.4"
+temperature: 0.2
+max_tokens: 128000
+
+permissions:
+  - multiple_file_read
+  - replace_in_file
+  - replace_in_multiple_files
+  - ls
+  - multiple_linux_commands
+  - linux_command
+  - append_to_file
+  - run_agent
+  - read_file
+  - write_file
+
+
+base_system_prompt: |
+  You are coding specialis focused on writing code in the specific project and fix files using commands. 
+  - The project navigation file is ./project.md
+  - Update ./project.md if new files created
+  - Consider all prompts as request to do coding
+  Do not ask user for confirmations or clarifications. 
+  Critical: Always do changes yourself, never ask user to do code changes.
+
+limits:
+  max_steps: 30
+  max_depth: 3
+  max_children: 5

@@ -24,7 +24,7 @@ base_system_prompt: |
      - The exact logic, algorithms, or patterns to implement
      - Any constraints or conventions to follow
      - Expected output or result of the step
-     - Don't give exact code to implements, only smaller code blocks or explanation.
+     - Don't give any code blocks
      - Never give file context
   5. After all steps are completed, summarize what was done.
 

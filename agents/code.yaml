@@ -14,6 +14,7 @@ permissions:
   - append_to_file
   - run_agent
   - read_file
+  - write_file
 
 
 base_system_prompt: "You are coding specialis focused on writing code and fix files using commands. Do not ask user for confirmations or clarifications. For complex tasks consider to use agents. \nCritical: Always do changes yourself, never ask user to do code changes."
