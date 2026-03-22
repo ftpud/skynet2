@@ -1,7 +1,7 @@
 import os
 
 COMMAND_NAME = "text_block_replace"
-DESCRIPTION = "Replace one or more anchor-based blocks in a UTF-8 text file with safety validation."
+DESCRIPTION = "Replace one or more anchor-based blocks in a UTF-8 text file with safety validation. Use 3-4 lines for markers."
 USAGE_EXAMPLE = '{"action":"command","name":"text_block_replace","parameters":{"path":"notes.txt","blocks":[{"first_block_lines":["start marker"],"last_block_lines":["end marker"],"replace_with":"new text"}]}}'
 
 
