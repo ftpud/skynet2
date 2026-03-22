@@ -29,18 +29,34 @@ hooks:
     echo "Created branch: $branch"
   on_run_finish: |
     if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      current_branch=$(git branch --show-current)
+      previous_branch=$(git reflog --pretty=%gs | sed -n 's/checkout: moving from \([^ ]*\) to .*/\1/p' | head -n 1)
+      git --no-pager diff --stat
+      printf "\n"
       git --no-pager diff
-      printf "Merge changes back to previous branch? [y/N]: "
+      printf "\nMerge changes? [accept/drop/exit]: "
       read answer
-      if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
-        current_branch=$(git branch --show-current)
-        previous_branch=$(git reflog --pretty=%gs | sed -n 's/checkout: moving from \([^ ]*\) to .*/\1/p' | head -n 1)
-        if [ -n "$previous_branch" ] && [ -n "$current_branch" ] && [ "$previous_branch" != "$current_branch" ]; then
-          git checkout "$previous_branch" && git merge "$current_branch"
-        else
-          echo "Could not determine previous branch for merge."
-        fi
-      fi
+      case "$answer" in
+        accept)
+          if [ -n "$previous_branch" ] && [ -n "$current_branch" ] && [ "$previous_branch" != "$current_branch" ]; then
+            git checkout "$previous_branch" && git merge "$current_branch"
+          else
+            echo "Could not determine previous branch for merge."
+          fi
+          ;;
+        drop)
+          if [ -n "$previous_branch" ] && [ -n "$current_branch" ] && [ "$previous_branch" != "$current_branch" ]; then
+            git checkout "$previous_branch" && git branch -D "$current_branch"
+          else
+            echo "Could not determine previous branch for drop."
+          fi
+          ;;
+        exit)
+          ;;
+        *)
+          echo "Unknown choice. Doing nothing."
+          ;;
+      esac
     fi
 
 base_system_prompt: |
