@@ -76,7 +76,7 @@ SAFETY:
 
 
 def extract_json(text: str) -> dict | None:
-    text = re.sub(r'```(?:json)?', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'(?:json)?', '', text, flags=re.IGNORECASE)
     text = text.strip()
 
     decoder = json.JSONDecoder()
@@ -101,10 +101,15 @@ def extract_json(text: str) -> dict | None:
         for start in starts:
             try:
                 obj, _end = decoder.raw_decode(repaired[start:])
-                if isinstance(obj, dict):
+                if isinstance(obj, dict) and obj.get("action") in ("command", "final_answer"):
                     return obj
+                if isinstance(obj, dict) and "action" in obj:
+                    candidates.append(obj)
             except json.JSONDecodeError:
                 pass
+
+    if candidates:
+        return candidates[0]
 
     best: dict | None = None
     best_len = 0
@@ -136,13 +141,13 @@ def extract_json(text: str) -> dict | None:
                 if len(block) > best_len:
                     try:
                         obj = json.loads(block)
-                        if isinstance(obj, dict):
+                        if isinstance(obj, dict) and obj.get("action") in ("command", "final_answer"):
                             best = obj
                             best_len = len(block)
                     except json.JSONDecodeError:
                         try:
                             obj = json.loads(re.sub(r',\s*([}\]])', r'\1', block))
-                            if isinstance(obj, dict):
+                            if isinstance(obj, dict) and obj.get("action") in ("command", "final_answer"):
                                 best = obj
                                 best_len = len(block)
                         except json.JSONDecodeError:
