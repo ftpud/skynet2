@@ -2,6 +2,11 @@
 
 ## Core
 - `agent.py`: main orchestrator.
+- `agent_cli.py`: CLI parsing and runtime config loading.
+- `agent_constants.py`: shared execution limits.
+- `agent_loaders.py`: command and agent config discovery.
+- `agent_logging.py`: JSONL logging helpers.
+- `agent_utils.py`: prompt, JSON extraction, and token helpers.
 - `agents/*.yaml`: agent role configs.
 - `commands/*.py`: executable command handlers.
 

@@ -4,32 +4,31 @@ Production-ready lightweight ReAct-style AI Agent
 Follows strict JSON protocol, hierarchical spawning, bounded execution
 """
 
-import argparse
-import importlib.util
-import json
 import os
-import re
 import subprocess
 import sys
 import time
 from datetime import datetime
-import yaml
+
 from openai import OpenAI
 try:
     from anthropic import Anthropic
 except Exception:
     Anthropic = None
 
-# ───────────────────────────────────────────────
-#  Global limits (can be overridden in config)
-# ───────────────────────────────────────────────
-MAX_STEPS = 30
-MAX_RETRIES_PER_STEP = 3
-MAX_OUTPUT_CHARS = 300000
-MAX_CONTEXT_MESSAGES = 20
-MAX_AGENT_DEPTH = 3
-MAX_CHILD_AGENTS = 5
-CHILD_AGENT_TIMEOUT = 600      # seconds
+from agent_cli import load_runtime_config, parse_args
+from agent_constants import (
+    CHILD_AGENT_TIMEOUT,
+    MAX_AGENT_DEPTH,
+    MAX_CHILD_AGENTS,
+    MAX_CONTEXT_MESSAGES,
+    MAX_OUTPUT_CHARS,
+    MAX_RETRIES_PER_STEP,
+    MAX_STEPS,
+)
+from agent_loaders import load_agents, load_commands
+from agent_logging import log_session_end, log_session_start, log_step
+from agent_utils import build_system_prompt, extract_json, extract_usage, is_codex
 
 
 class Agent:
@@ -52,34 +51,32 @@ class Agent:
             raise ValueError(f"Unsupported provider: {self.provider}")
 
         self.history: list[dict] = []
-        self.recent_actions: list[dict] = []        # for loop detection
+        self.recent_actions: list[dict] = []
         self.session_tokens_in = 0
         self.session_tokens_out = 0
 
-        # Load limits (prefer config → globals)
         limits = config.get("limits", {})
-        self.max_steps           = limits.get("max_steps",   MAX_STEPS)
-        self.max_depth           = limits.get("max_depth",   MAX_AGENT_DEPTH)
-        self.max_children        = limits.get("max_children",MAX_CHILD_AGENTS)
-        self.max_output_chars    = MAX_OUTPUT_CHARS
+        self.max_steps = limits.get("max_steps", MAX_STEPS)
+        self.max_depth = limits.get("max_depth", MAX_AGENT_DEPTH)
+        self.max_children = limits.get("max_children", MAX_CHILD_AGENTS)
+        self.max_output_chars = MAX_OUTPUT_CHARS
         self.max_context_messages = MAX_CONTEXT_MESSAGES
 
-        # Logging — now supports parent-passed exact path
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
         self.logs_dir = os.path.join(self.base_dir, "logs")
         os.makedirs(self.logs_dir, exist_ok=True)
 
         if log_path is not None:
-            self.log_path = log_path                      # ← use exactly what parent gave us
+            self.log_path = log_path
         else:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             self.log_path = os.path.join(self.logs_dir, f"{agent_name}_{ts}.jsonl")
 
-        self._log_session_start()
+        log_session_start(self.log_path, self.agent_name, self.provider, self.model, self.depth)
 
-        self.command_info, self.command_handlers = self._load_commands()
-        self.agent_info = self._load_agents()
-        self.system_prompt = self._build_system_prompt()
+        self.command_info, self.command_handlers = load_commands(self.base_dir)
+        self.agent_info = load_agents(self.base_dir)
+        self.system_prompt = build_system_prompt(self.config, self.command_info, self.agent_info)
 
         if self.verbose:
             print(f"[START] Agent '{agent_name}' | depth={depth} | provider={self.provider} | model={model}", file=sys.stderr)
@@ -88,292 +85,14 @@ class Agent:
             print(f"   max steps    : {self.max_steps}", file=sys.stderr)
             print(f"   log file     → {self.log_path}\n", file=sys.stderr)
 
-    def _load_commands(self) -> tuple[dict, dict]:
-        command_info: dict = {}
-        command_handlers: dict = {}
-
-        commands_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "commands")
-        os.makedirs(commands_dir, exist_ok=True)
-
-        for filename in sorted(os.listdir(commands_dir)):
-            if not filename.endswith(".py") or filename.startswith("_"):
-                continue
-
-            path = os.path.join(commands_dir, filename)
-            module_name = f"commands.{filename[:-3]}"
-
-            try:
-                spec = importlib.util.spec_from_file_location(module_name, path)
-                if not spec or not spec.loader:
-                    continue
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-
-                name = getattr(module, "COMMAND_NAME", None)
-                description = getattr(module, "DESCRIPTION", None)
-                usage_example = getattr(module, "USAGE_EXAMPLE", None)
-                handler = getattr(module, "execute", None)
-                if not callable(handler):
-                    handler = getattr(module, "run", None)
-
-                if not name or not isinstance(name, str):
-                    continue
-                if not callable(handler):
-                    continue
-
-                command_info[name] = {
-                    "description": description or "No description provided.",
-                    "usage_example": usage_example or "{}"
-                }
-                command_handlers[name] = handler
-            except Exception:
-                continue
-
-        return command_info, command_handlers
-
-    def _load_agents(self) -> dict:
-        agent_info: dict = {}
-
-        agents_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents")
-        os.makedirs(agents_dir, exist_ok=True)
-
-        for filename in sorted(os.listdir(agents_dir)):
-            if not (filename.endswith(".yaml") or filename.endswith(".yml")):
-                continue
-
-            path = os.path.join(agents_dir, filename)
-            try:
-                with open(path, encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f) or {}
-
-                name = os.path.splitext(filename)[0]
-                description = cfg.get("description") or cfg.get("role") or "No description provided."
-                agent_info[name] = {
-                    "description": description
-                }
-            except Exception:
-                continue
-
-        return agent_info
-
     def _log(self, step: int, action: str, parameters: dict, result: str):
-        entry = {
-            "type": "step",
-            "step": step,
-            "action": action,
-            "parameters": parameters,
-            "result": result[:500] + "…" if len(result) > 500 else result,
-            "timestamp": datetime.now().isoformat(),
-            "agent": self.agent_name,
-            "provider": self.provider,
-            "model": self.model,
-            "depth": self.depth
-        }
-        try:
-            with open(self.log_path, "a", encoding="utf-8") as f:
-                json.dump(entry, f, ensure_ascii=False)
-                f.write("\n")
-        except:
-            pass
-
-    def _log_session_start(self):
-        entry = {
-            "type": "session_start",
-            "agent": self.agent_name,
-            "provider": self.provider,
-            "model": self.model,
-            "depth": self.depth,
-            "timestamp": datetime.now().isoformat()
-        }
-        try:
-            with open(self.log_path, "a", encoding="utf-8") as f:
-                json.dump(entry, f, ensure_ascii=False)
-                f.write("\n")
-        except:
-            pass
+        log_step(self.log_path, self.agent_name, self.provider, self.model, self.depth, step, action, parameters, result)
 
     def _log_session_end(self):
-        total = self.session_tokens_in + self.session_tokens_out
-        entry = {
-            "type": "session_end",
-            "agent": self.agent_name,
-            "provider": self.provider,
-            "model": self.model,
-            "tokens": {
-                "inbound": self.session_tokens_in,
-                "outbound": self.session_tokens_out,
-                "total": total
-            },
-            "timestamp": datetime.now().isoformat()
-        }
-        try:
-            with open(self.log_path, "a", encoding="utf-8") as f:
-                json.dump(entry, f, ensure_ascii=False)
-                f.write("\n")
-        except:
-            pass
-
-    def _build_system_prompt(self) -> str:
-        role = self.config.get("role", "assistant")
-        base = self.config.get("base_system_prompt", "").strip()
-
-        cmd_list = ""
-        allowed = self.config.get("permissions", [])
-        for name in allowed:
-            if name not in self.command_info:
-                continue
-            info = self.command_info[name]
-            cmd_list += f"• {name}\n  {info['description']}\n  Example: {info['usage_example']}\n\n"
-
-        allowed_agents_list = ""
-        allowed_agents = self.config.get("allowed_agents", [])
-        for name in allowed_agents:
-            info = self.agent_info.get(name)
-            if not info:
-                continue
-            allowed_agents_list += f"• {name}\n  {info['description']}\n\n"
-
-        return f"""You are a {role} agent.
-
-{base}
-
-You MUST respond with EXACTLY ONE valid JSON object and nothing else.
-
-Possible actions:
-
-1. Execute allowed command
-{{
-  "action": "command",
-  "name": "<command_name>",
-  "parameters": {{ ... }}
-}}
-
-2. Give final answer and stop
-{{
-  "action": "final_answer",
-  "content": "PLAIN TEXT ONLY"
-}}
-
-CRITICAL RULES:
-- ONLY output valid JSON — no explanations, no markdown, no ```json blocks
-- Use one of the allowed commands below
-- Do not repeat the same action/parameters more than twice
-- NEVER wrap action in final_answer
-- Always perform all required steps by commands
-
-
-ALLOWED COMMANDS:
-{cmd_list}
-ALLOWED AGENTS:
-{allowed_agents_list}
-
-STRATEGY:
-- Think step-by-step inside your reasoning (but do NOT output reasoning)
-- Prefer shortest reliable path
-- If command fails → try different approach, do NOT loop
-- Never ask for confirmation
-- Always perform all steps
-
-SAFETY:
-- Never run destructive commands (rm -rf, shutdown, etc.)
-"""
+        log_session_end(self.log_path, self.agent_name, self.provider, self.model, self.session_tokens_in, self.session_tokens_out)
 
     def _extract_json(self, text: str) -> dict | None:
-        """
-        Robust JSON extractor that handles:
-        - Markdown code fences (```json ... ``` or ``` ... ```)
-        - Leading/trailing garbage text
-        - Extra symbols or text AFTER the closing brace
-        - Multiple JSON objects in one response (returns first valid action object)
-        - Escaped or malformed unicode sequences
-        - Trailing commas inside objects (best-effort fix)
-        """
-        # 1. Strip markdown fences (```json ... ``` or ``` ... ```)
-        text = re.sub(r'```(?:json)?\s*', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'```', '', text)
-        text = text.strip()
-
-        decoder = json.JSONDecoder()
-
-        # 2. Find every '{' and try raw_decode from that position.
-        #    raw_decode stops exactly at the end of the first complete JSON value,
-        #    so trailing garbage (text, extra braces, symbols) is ignored.
-        starts = [i for i, ch in enumerate(text) if ch == '{']
-        candidates: list[dict] = []
-        for start in starts:
-            try:
-                obj, _end = decoder.raw_decode(text[start:])
-                if isinstance(obj, dict) and obj.get("action") in ("command", "final_answer"):
-                    # Prefer objects that look like valid agent actions
-                    return obj
-                if isinstance(obj, dict) and "action" in obj:
-                    candidates.append(obj)
-            except json.JSONDecodeError:
-                pass
-
-        # 3. Return first dict candidate with action key
-        if candidates:
-            return candidates[0]
-
-        # 4. Best-effort repair: remove trailing commas before } or ]
-        #    then retry the scan.
-        repaired = re.sub(r',\s*([}\]])', r'\1', text)
-        if repaired != text:
-            starts = [i for i, ch in enumerate(repaired) if ch == '{']
-            for start in starts:
-                try:
-                    obj, _end = decoder.raw_decode(repaired[start:])
-                    if isinstance(obj, dict):
-                        return obj
-                except json.JSONDecodeError:
-                    pass
-
-        # 5. Last resort: grab the largest {...} block via brace matching and parse it
-        best: dict | None = None
-        best_len = 0
-        depth = 0
-        in_string = False
-        escape = False
-        block_start: int | None = None
-
-        for i, ch in enumerate(text):
-            if escape:
-                escape = False
-                continue
-            if ch == '\\' and in_string:
-                escape = True
-                continue
-            if ch == '"':
-                in_string = not in_string
-                continue
-            if in_string:
-                continue
-            if ch == '{':
-                if depth == 0:
-                    block_start = i
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-                if depth == 0 and block_start is not None:
-                    block = text[block_start:i + 1]
-                    if len(block) > best_len:
-                        try:
-                            obj = json.loads(block)
-                            if isinstance(obj, dict):
-                                best = obj
-                                best_len = len(block)
-                        except json.JSONDecodeError:
-                            # Try repairing trailing commas in this block
-                            try:
-                                obj = json.loads(re.sub(r',\s*([}\]])', r'\1', block))
-                                if isinstance(obj, dict):
-                                    best = obj
-                                    best_len = len(block)
-                            except json.JSONDecodeError:
-                                pass
-                    block_start = None
-
-        return best
+        return extract_json(text)
 
     def _run_agent(self, params: dict, step: int) -> str:
         if self.depth + 1 > self.max_depth:
@@ -388,38 +107,37 @@ SAFETY:
 
         self.spawned_children += 1
 
-        # Parent decides the exact filename the child will use
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         child_log_path = os.path.join(self.logs_dir, f"{child_agent}_{ts}.jsonl")
 
-        # Log ONCE with real step number
         self._log(
             step=step,
             action="run_agent",
             parameters={"agent": child_agent, "prompt": child_prompt},
-            result=f"child session starting | log file → {child_log_path}"
+            result=f"child session starting | log file → {child_log_path}",
         )
 
         cmd = [
-            sys.executable, os.path.abspath(__file__),
-            "--agent", child_agent,
-            "--prompt", child_prompt,
-            "--depth", str(self.depth + 1),
-            "--log-path", child_log_path,
-          #  "--provider-override", self.provider,
+            sys.executable,
+            os.path.abspath(__file__),
+            "--agent",
+            child_agent,
+            "--prompt",
+            child_prompt,
+            "--depth",
+            str(self.depth + 1),
+            "--log-path",
+            child_log_path,
         ]
         if self.verbose:
             cmd += ["--verbose"]
 
         try:
-            r = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=CHILD_AGENT_TIMEOUT
-            )
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=CHILD_AGENT_TIMEOUT)
             if r.returncode == 0:
                 return f"FINAL_ANSWER: {r.stdout.strip()}"
-            else:
-                err = r.stderr.strip()[:400]
-                return f"ERROR: child agent failed\n{r.returncode=}\n{err}"
+            err = r.stderr.strip()[:400]
+            return f"ERROR: child agent failed\n{r.returncode=}\n{err}"
         except subprocess.TimeoutExpired:
             return "ERROR: child agent timed out"
         except Exception as e:
@@ -427,7 +145,7 @@ SAFETY:
 
     def execute_command(self, name: str, params: dict, step: int) -> str:
         if name == "run_agent":
-            return self._run_agent(params, step)   # pass real step
+            return self._run_agent(params, step)
 
         handler = self.command_handlers.get(name)
         if not handler:
@@ -439,21 +157,10 @@ SAFETY:
             return f"ERROR: {e}"
 
     def _is_codex(self) -> bool:
-        return "codex" in self.model.lower()
+        return is_codex(self.model)
 
     def _extract_usage(self, usage, api_type: str) -> tuple[int, int]:
-        if usage is None:
-            return (0, 0)
-        if api_type == "chat_completions":
-            return (
-                int(getattr(usage, "prompt_tokens", 0) or 0),
-                int(getattr(usage, "completion_tokens", 0) or 0),
-            )
-        else:  # responses API or claude
-            return (
-                int(getattr(usage, "input_tokens", 0) or 0),
-                int(getattr(usage, "output_tokens", 0) or 0),
-            )
+        return extract_usage(usage, api_type)
 
     def _call_model(self, messages: list[dict]) -> tuple[str, int, int]:
         temperature = self.config.get("temperature", 0.0 if self._is_codex() else 0.7)
@@ -466,7 +173,6 @@ SAFETY:
         max_tokens = self.config.get("max_tokens", default_max)
 
         if self.provider == "openai" and self._is_codex():
-            # ── OpenAI Responses API (Codex / reasoning models) ──────────
             full_response = ""
             parsed_early = None
             with self.client.responses.stream(
@@ -489,11 +195,10 @@ SAFETY:
                 usage = getattr(final_response, "usage", None)
                 in_tokens, out_tokens = self._extract_usage(usage, "responses")
                 if parsed_early is not None:
-                    return json.dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
+                    return __import__("json").dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
                 return full_response, in_tokens, out_tokens
 
         elif self.provider == "openai":
-            # ── OpenAI Chat Completions API (standard GPT models) ────────
             full_response = ""
             parsed_early = None
             stream = self.client.chat.completions.create(
@@ -519,10 +224,9 @@ SAFETY:
                     continue
             in_tokens, out_tokens = self._extract_usage(usage, "chat_completions")
             if parsed_early is not None:
-                return json.dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
+                return __import__("json").dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
             return full_response, in_tokens, out_tokens
 
-        # ── Claude streaming ─────────────────────────────────────────────
         system_text = ""
         claude_messages = []
         for m in messages:
@@ -531,22 +235,19 @@ SAFETY:
             else:
                 claude_messages.append(m)
 
-        # Retry with expanding max_tokens window on truncation
         claude_max_tokens = max_tokens
-        MAX_CLAUDE_TOKENS = max_tokens
-        INITIAL_CLAUDE_TOKENS = min(40000, claude_max_tokens)
-        claude_max_tokens = INITIAL_CLAUDE_TOKENS
+        max_claude_tokens = max_tokens
+        initial_claude_tokens = min(40000, claude_max_tokens)
+        claude_max_tokens = initial_claude_tokens
         claude_attempt = 0
-        MAX_CLAUDE_RETRIES = 4
+        max_claude_retries = 4
 
-        while claude_attempt < MAX_CLAUDE_RETRIES:
+        while claude_attempt < max_claude_retries:
             claude_attempt += 1
             full_response = ""
             parsed_early = None
             in_tokens, out_tokens = 0, 0
             stop_reason = None
-
-        
 
             with self.client.messages.stream(
                 model=self.model,
@@ -554,7 +255,6 @@ SAFETY:
                 messages=claude_messages,
                 temperature=temperature,
                 max_tokens=claude_max_tokens,
-                #stop_sequences=["\n\n"],
             ) as stream:
                 for text in stream.text_stream:
                     if self.verbose and text:
@@ -562,12 +262,10 @@ SAFETY:
                     full_response += text
                     parsed_early = self._extract_json(full_response)
                     if parsed_early is not None:
-                        # Force-close the HTTP stream immediately — no need to wait
                         try:
                             stream.close()
                         except Exception:
                             pass
-                        # Try to grab partial usage
                         try:
                             usage = getattr(stream, "_MessageStream__message", None)
                             if usage is None:
@@ -580,7 +278,6 @@ SAFETY:
                         break
 
                 if parsed_early is None:
-                    # Stream exhausted normally — get final message for usage + stop_reason
                     try:
                         message = stream.get_final_message()
                         usage = getattr(message, "usage", None)
@@ -590,18 +287,16 @@ SAFETY:
                         pass
 
             if parsed_early is not None:
-                return json.dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
+                return __import__("json").dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
 
-            # If truncated, expand the token window and retry
-            if stop_reason == "max_tokens" and claude_max_tokens < MAX_CLAUDE_TOKENS:
-                new_limit = min(claude_max_tokens * 2, MAX_CLAUDE_TOKENS)
+            if stop_reason == "max_tokens" and claude_max_tokens < max_claude_tokens:
+                new_limit = min(claude_max_tokens * 2, max_claude_tokens)
                 if self.verbose:
                     print(f"   [claude] truncated at {claude_max_tokens} tokens → retrying with {new_limit}", file=sys.stderr)
                 claude_max_tokens = new_limit
                 time.sleep(0.3)
                 continue
 
-            # Non-truncation failure — break out and let caller handle
             break
 
         return full_response, in_tokens, out_tokens
@@ -615,9 +310,7 @@ SAFETY:
             if self.verbose:
                 print(f"[{step:2d}] Calling {self.provider}:{self.model} …", file=sys.stderr)
 
-            messages = [
-                {"role": "system", "content": self.system_prompt}
-            ] + self.history[-self.max_context_messages:]
+            messages = [{"role": "system", "content": self.system_prompt}] + self.history[-self.max_context_messages :]
 
             parsed = None
             for attempt in range(1, MAX_RETRIES_PER_STEP + 1):
@@ -638,7 +331,6 @@ SAFETY:
                 if parsed:
                     break
 
-                # Tell model what went wrong
                 error_feedback = (
                     "Your last response was not valid JSON.\n"
                     "You MUST output EXACTLY one JSON object with no extra text.\n"
@@ -659,7 +351,6 @@ SAFETY:
                 self.history.append({"role": "user", "content": "Missing 'action' field in JSON"})
                 continue
 
-            # Simple loop detection (last 3 identical actions)
             curr = {"action": action}
             if action == "command":
                 curr["name"] = parsed.get("name")
@@ -667,10 +358,7 @@ SAFETY:
             self.recent_actions.append(curr)
             if len(self.recent_actions) > 3:
                 self.recent_actions.pop(0)
-            if len(self.recent_actions) == 3 and len({
-                json.dumps(d, sort_keys=True)
-                for d in self.recent_actions
-            }) == 1:
+            if len(self.recent_actions) == 3 and len({__import__("json").dumps(d, sort_keys=True) for d in self.recent_actions}) == 1:
                 if self.verbose:
                     print(" → Loop detected — forcing final answer", file=sys.stderr)
                 print("Agent appears stuck in loop. Terminating.")
@@ -679,20 +367,16 @@ SAFETY:
 
             if action == "final_answer":
                 content = parsed.get("content", "(no content)")
-
-                # 🚨 Detect wrapped JSON → reject + retry
                 is_invalid = False
 
                 if isinstance(content, str):
                     stripped = content.strip()
-
-                    # Fast check (cheap)
                     if stripped.startswith("{") and stripped.endswith("}"):
                         try:
-                            inner = json.loads(stripped)
+                            inner = __import__("json").loads(stripped)
                             if isinstance(inner, dict) and "action" in inner:
                                 is_invalid = True
-                        except:
+                        except Exception:
                             pass
 
                 if is_invalid:
@@ -709,11 +393,10 @@ SAFETY:
                     )
 
                     self.history.append({"role": "user", "content": error_feedback})
-                    continue  # 🔁 retry same step
+                    continue
 
-                # ✅ Valid final answer → finish
                 if self.verbose:
-                    print(f"\n → Final answer:", file=sys.stderr)
+                    print("\n → Final answer:", file=sys.stderr)
 
                 print(content)
                 self._log(step, "final_answer", {}, content)
@@ -728,74 +411,32 @@ SAFETY:
                 else:
                     if self.verbose:
                         print(f" → {name} {params}", file=sys.stderr)
-                    obs = self.execute_command(name, params, step)   # <<< pass step
+                    obs = self.execute_command(name, params, step)
 
-                obs = obs[:self.max_output_chars] + "…" if len(obs) > self.max_output_chars else obs
+                obs = obs[: self.max_output_chars] + "…" if len(obs) > self.max_output_chars else obs
 
-                self.history.append({"role": "assistant", "content": json.dumps(parsed)})
+                self.history.append({"role": "assistant", "content": __import__("json").dumps(parsed)})
                 self.history.append({"role": "user", "content": f"Observation: {obs}"})
 
-                # <<< NEW: skip _log for run_agent (already logged above) >>>
                 if name != "run_agent":
                     self._log(step, name, params, obs)
 
                 if self.verbose:
-                    print(f"   ↳ {obs[:120]}{'…' if len(obs)>120 else ''}", file=sys.stderr)
+                    print(f"   ↳ {obs[:120]}{'…' if len(obs) > 120 else ''}", file=sys.stderr)
 
             else:
                 self.history.append({"role": "user", "content": "Invalid action — must be 'command' or 'final_answer'"})
 
-        # max steps reached
         if self.verbose:
             print(f"Reached max steps ({self.max_steps}) without final answer.", file=sys.stderr)
         self._log(step, "max_steps_reached", {}, "terminated without final_answer")
         print("Agent reached maximum step limit without producing a final answer.")
 
-# ────────────────────────────────────────────────
-#  CLI
-# ────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Lightweight ReAct JSON agent")
-    parser.add_argument("--agent",   required=True,  help="agent config name (agents/<name>.yaml)")
-    parser.add_argument("--prompt",  required=True,  help="initial user prompt / task")
-    parser.add_argument("--model",   default=None,   help="override model name")
-    parser.add_argument("--provider", default=None, choices=["openai", "claude"], help="LLM provider override")
-    parser.add_argument("--provider-override", default=None, choices=["openai", "claude"], help="force provider for all agents (overrides CLI and config)")
-    parser.add_argument("--depth",   type=int, default=0, help="current hierarchy depth (internal)")
-    parser.add_argument("--log-path", default=None, help="internal: exact log file path (for child agents)")
-    parser.add_argument("-v", "--verbose", action="store_true", help="show detailed progress")
-
-    args = parser.parse_args()
-
+    args = parse_args()
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(script_dir, "agents", f"{args.agent}.yaml")
-    if not os.path.isfile(config_path):
-        print(f"Error: config not found → {config_path}")
-        sys.exit(1)
-
-    try:
-        with open(config_path, encoding="utf-8") as f:
-            config = yaml.safe_load(f)
-    except Exception as e:
-        print(f"Error reading config: {e}")
-        sys.exit(1)
-
-    model = args.model or config.get("model")
-    if not model:
-        print("Error: model must be set in config or via --model")
-        sys.exit(1)
-
-    provider = (args.provider_override or args.provider or config.get("provider") or "openai").lower()
-    if provider not in {"openai", "claude"}:
-        print("Error: provider must be 'openai' or 'claude'")
-        sys.exit(1)
-
-    if provider == "openai" and not os.getenv("OPENAI_API_KEY"):
-        print("Error: OPENAI_API_KEY environment variable is required for provider=openai")
-        sys.exit(1)
-    if provider == "claude" and not os.getenv("ANTHROPIC_API_KEY"):
-        print("Error: ANTHROPIC_API_KEY environment variable is required for provider=claude")
-        sys.exit(1)
+    config, model, provider = load_runtime_config(args, script_dir)
 
     agent = Agent(
         config=config,

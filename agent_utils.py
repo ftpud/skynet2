@@ -1,0 +1,163 @@
+import json
+import re
+
+
+def build_system_prompt(config: dict, command_info: dict, agent_info: dict) -> str:
+    role = config.get("role", "assistant")
+    base = config.get("base_system_prompt", "").strip()
+
+    cmd_list = ""
+    allowed = config.get("permissions", [])
+    for name in allowed:
+        if name not in command_info:
+            continue
+        info = command_info[name]
+        cmd_list += f"• {name}\n  {info['description']}\n  Example: {info['usage_example']}\n\n"
+
+    allowed_agents_list = ""
+    allowed_agents = config.get("allowed_agents", [])
+    for name in allowed_agents:
+        info = agent_info.get(name)
+        if not info:
+            continue
+        allowed_agents_list += f"• {name}\n  {info['description']}\n\n"
+
+    return f"""You are a {role} agent.
+
+{base}
+
+You MUST respond with EXACTLY ONE valid JSON object and nothing else.
+
+Possible actions:
+
+1. Execute allowed command
+{{
+  \"action\": \"command\",
+  \"name\": \"<command_name>\",
+  \"parameters\": {{ ... }}
+}}
+
+2. Give final answer and stop
+{{
+  \"action\": \"final_answer\",
+  \"content\": \"PLAIN TEXT ONLY\"
+}}
+
+CRITICAL RULES:
+- ONLY output valid JSON — no explanations, no markdown, no blocks
+- Use one of the allowed commands below
+- Do not repeat the same action/parameters more than twice
+- NEVER wrap action in final_answer
+- Always perform all required steps by commands
+
+
+ALLOWED COMMANDS:
+{cmd_list}
+ALLOWED AGENTS:
+{allowed_agents_list}
+
+STRATEGY:
+- Think step-by-step inside your reasoning (but do NOT output reasoning)
+- Prefer shortest reliable path
+- If command fails → try different approach, do NOT loop
+- Never ask for confirmation
+- Always perform all steps
+
+SAFETY:
+- Never run destructive commands (rm -rf, shutdown, etc.)
+"""
+
+
+def extract_json(text: str) -> dict | None:
+    text = re.sub(r'```(?:json)?', '', text, flags=re.IGNORECASE)
+    text = text.strip()
+
+    decoder = json.JSONDecoder()
+    starts = [i for i, ch in enumerate(text) if ch == '{']
+    candidates: list[dict] = []
+    for start in starts:
+        try:
+            obj, _end = decoder.raw_decode(text[start:])
+            if isinstance(obj, dict) and obj.get("action") in ("command", "final_answer"):
+                return obj
+            if isinstance(obj, dict) and "action" in obj:
+                candidates.append(obj)
+        except json.JSONDecodeError:
+            pass
+
+    if candidates:
+        return candidates[0]
+
+    repaired = re.sub(r',\s*([}\]])', r'\1', text)
+    if repaired != text:
+        starts = [i for i, ch in enumerate(repaired) if ch == '{']
+        for start in starts:
+            try:
+                obj, _end = decoder.raw_decode(repaired[start:])
+                if isinstance(obj, dict):
+                    return obj
+            except json.JSONDecodeError:
+                pass
+
+    best: dict | None = None
+    best_len = 0
+    depth = 0
+    in_string = False
+    escape = False
+    block_start: int | None = None
+
+    for i, ch in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if ch == '\\' and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            if depth == 0:
+                block_start = i
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0 and block_start is not None:
+                block = text[block_start:i + 1]
+                if len(block) > best_len:
+                    try:
+                        obj = json.loads(block)
+                        if isinstance(obj, dict):
+                            best = obj
+                            best_len = len(block)
+                    except json.JSONDecodeError:
+                        try:
+                            obj = json.loads(re.sub(r',\s*([}\]])', r'\1', block))
+                            if isinstance(obj, dict):
+                                best = obj
+                                best_len = len(block)
+                        except json.JSONDecodeError:
+                            pass
+                block_start = None
+
+    return best
+
+
+def is_codex(model: str) -> bool:
+    return "codex" in model.lower()
+
+
+def extract_usage(usage, api_type: str) -> tuple[int, int]:
+    if usage is None:
+        return (0, 0)
+    if api_type == "chat_completions":
+        return (
+            int(getattr(usage, "prompt_tokens", 0) or 0),
+            int(getattr(usage, "completion_tokens", 0) or 0),
+        )
+    return (
+        int(getattr(usage, "input_tokens", 0) or 0),
+        int(getattr(usage, "output_tokens", 0) or 0),
+    )
