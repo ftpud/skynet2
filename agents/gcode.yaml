@@ -1,6 +1,6 @@
 role: "Coding specialist"
 provider: "openai"
-model: "gpt-5.4"
+model: "gpt-5.3-codex"
 temperature: 0.2
 max_tokens: 128000
 
@@ -15,11 +15,33 @@ permissions:
   - read_file
   - write_file
 
-allowed_agents: []
+allowed_agents:
+  - gcode
 
 hooks:
-  on_run_start: ""
-  on_run_finish: ""
+  on_run_start: |
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      echo "Git repository not found. Exiting."
+      exit 1
+    fi
+    branch="gcode/$(date +%Y%m%d_%H%M%S)"
+    git checkout -b "$branch"
+    echo "Created branch: $branch"
+  on_run_finish: |
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      git --no-pager diff
+      printf "Merge changes back to previous branch? [y/N]: "
+      read answer
+      if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
+        current_branch=$(git branch --show-current)
+        previous_branch=$(git reflog --pretty=%gs | sed -n 's/checkout: moving from \([^ ]*\) to .*/\1/p' | head -n 1)
+        if [ -n "$previous_branch" ] && [ -n "$current_branch" ] && [ "$previous_branch" != "$current_branch" ]; then
+          git checkout "$previous_branch" && git merge "$current_branch"
+        else
+          echo "Could not determine previous branch for merge."
+        fi
+      fi
+    fi
 
 base_system_prompt: |
   You are a coding agent working on a structured codebase.

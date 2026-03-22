@@ -1,3 +1,4 @@
+import os
 import subprocess
 
 COMMAND_NAME = "linux_command"
@@ -10,7 +11,6 @@ _BLOCKED = [
     "reboot",
     "mkfs",
     ":(){ :|:& };:",
-    
 ]
 
 
@@ -27,6 +27,14 @@ def execute(parameters: dict) -> str:
         for pattern in _BLOCKED:
             if pattern in lower:
                 return f"ERROR: blocked unsafe command pattern: {pattern}"
+
+        interactive = bool(parameters.get("interactive"))
+        if interactive:
+            shell = os.environ.get("SHELL") or "/bin/zsh"
+            return (
+                "ERROR: interactive shell handoff is not supported from this agent process. "
+                f"Requested command for manual run in your current shell: {shell} -ic {command!r}"
+            )
 
         result = subprocess.run(
             command,

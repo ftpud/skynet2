@@ -5,6 +5,7 @@ Follows strict JSON protocol, hierarchical spawning, bounded execution
 """
 
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -84,6 +85,9 @@ class Agent:
         self.command_info, self.command_handlers = load_commands(self.base_dir)
         self.agent_info = load_agents(self.base_dir)
         self.system_prompt = build_system_prompt(self.config, self.command_info, self.agent_info)
+        self.run_hooks = config.get("hooks", {}) or {}
+
+        self._run_hook("on_run_start")
 
         if self.verbose:
             self._vprint(f"[START] Agent '{agent_name}' | depth={depth} | provider={self.provider} | model={model}")
@@ -154,10 +158,52 @@ class Agent:
         log_step(self.log_path, self.agent_name, self.provider, self.model, self.depth, step, action, parameters, result)
 
     def _log_session_end(self):
+        self._run_hook("on_run_finish", {
+            "AGENT_SESSION_TOKENS_IN": self.session_tokens_in,
+            "AGENT_SESSION_TOKENS_OUT": self.session_tokens_out,
+        })
         log_session_end(self.log_path, self.agent_name, self.provider, self.model, self.session_tokens_in, self.session_tokens_out)
 
     def _extract_json(self, text: str) -> dict | None:
         return extract_json(text)
+
+    def _run_hook(self, hook_name: str, extra_env: dict[str, str] | None = None):
+        script = self.run_hooks.get(hook_name)
+        if not script:
+            return
+
+        env = os.environ.copy()
+        env.update({
+            "AGENT_NAME": self.agent_name,
+            "AGENT_MODEL": self.model,
+            "AGENT_PROVIDER": self.provider,
+            "AGENT_DEPTH": str(self.depth),
+            "AGENT_LOG_PATH": self.log_path,
+        })
+        if extra_env:
+            env.update({k: str(v) for k, v in extra_env.items()})
+
+        try:
+            result = subprocess.run(
+                script,
+                shell=True,
+                cwd=self.base_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            output = (result.stdout or "") + (result.stderr or "")
+            output = output.strip()
+            status = f"hook '{hook_name}' exit={result.returncode}"
+            if output:
+                status += f"\n{output[:400]}"
+            self._log(0, f"hook:{hook_name}", {"script": script}, status)
+            if self.verbose_log and self.verbose_log_path:
+                #self._vprint(f"[{hook_name}] {shlex.join([script])}")
+                if output:
+                    self._vprint(output[:400])
+        except Exception as e:
+            self._log(0, f"hook:{hook_name}", {"script": script}, f"ERROR: {e}")
 
     def _run_agent(self, params: dict, step: int) -> str:
         if self.depth + 1 > self.max_depth:

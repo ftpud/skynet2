@@ -22,9 +22,16 @@ def build_system_prompt(config: dict, command_info: dict, agent_info: dict) -> s
             continue
         allowed_agents_list += f"• {name}\n  {info['description']}\n\n"
 
+    hooks = config.get("hooks", {}) or {}
+    hooks_text = ""
+    if hooks:
+        hooks_text = "\nAGENT HOOKS (executed automatically by runtime):\n" + "\n".join(
+            f"- {name}: {script}" for name, script in hooks.items() if script
+        ) + "\n"
+
     return f"""You are a {role} agent.
 
-{base}
+{base}{hooks_text}
 
 You MUST respond with EXACTLY ONE valid JSON object and nothing else.
 

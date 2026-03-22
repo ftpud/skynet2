@@ -7,7 +7,7 @@
 - `agent_loaders.py`: command and agent config discovery.
 - `agent_logging.py`: JSONL logging helpers.
 - `agent_utils.py`: prompt, JSON extraction, and token helpers.
-- `agents/*.yaml`: agent role configs.
+- `agents/*.yaml`: agent role configs, including optional run hooks (`hooks.on_run_start`, `hooks.on_run_finish`).
 - `commands/*.py`: executable command handlers.
 
 ## UI
