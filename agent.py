@@ -32,7 +32,7 @@ from agent_utils import build_system_prompt, extract_json, extract_usage, is_cod
 
 
 class Agent:
-    def __init__(self, config: dict, model: str, depth: int, agent_name: str, verbose: bool = False, log_path: str | None = None, provider: str = "openai"):
+    def __init__(self, config: dict, model: str, depth: int, agent_name: str, verbose: bool = False, log_path: str | None = None, provider: str = "openai", verbose_log: bool = False, verbose_log_path: str | None = None, provider_override: str | None = None):
         self.config = config
         self.model = model
         self.depth = depth
@@ -40,7 +40,9 @@ class Agent:
         self.verbose = verbose
         self.spawned_children = 0
         self.provider = (provider or "openai").lower()
-
+        self.provider_override = (provider_override.lower() if provider_override else None)
+        self.verbose_log = verbose_log
+        self.verbose_log_path = verbose_log_path
         if self.provider == "openai":
             self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         elif self.provider == "claude":
@@ -72,6 +74,10 @@ class Agent:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             self.log_path = os.path.join(self.logs_dir, f"{agent_name}_{ts}.jsonl")
 
+        if self.verbose_log_path is None and self.verbose_log:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.verbose_log_path = os.path.join(self.logs_dir, f"verbose_{agent_name}_{ts}.log")
+
         log_session_start(self.log_path, self.agent_name, self.provider, self.model, self.depth)
 
         self.command_info, self.command_handlers = load_commands(self.base_dir)
@@ -79,11 +85,25 @@ class Agent:
         self.system_prompt = build_system_prompt(self.config, self.command_info, self.agent_info)
 
         if self.verbose:
-            print(f"[START] Agent '{agent_name}' | depth={depth} | provider={self.provider} | model={model}", file=sys.stderr)
-            print(f"   config role  : {config.get('role','<unset>')}", file=sys.stderr)
-            print(f"   permissions  : {', '.join(config.get('permissions',[])) or '<none>'}", file=sys.stderr)
-            print(f"   max steps    : {self.max_steps}", file=sys.stderr)
-            print(f"   log file     → {self.log_path}\n", file=sys.stderr)
+            self._vprint(f"[START] Agent '{agent_name}' | depth={depth} | provider={self.provider} | model={model}")
+            self._vprint(f"   config role  : {config.get('role','<unset>')}")
+            self._vprint(f"   permissions  : {', '.join(config.get('permissions',[])) or '<none>'}")
+            self._vprint(f"   max steps    : {self.max_steps}")
+            self._vprint(f"   log file     → {self.log_path}")
+            if self.verbose_log and self.verbose_log_path:
+                self._vprint(f"   verbose log  → {self.verbose_log_path}")
+            self._vprint()
+
+    def _vprint(self, text: str = "", end: str = "\n"):
+        if self.verbose:
+            print(text, end=end, file=sys.stderr, flush=True)
+        if self.verbose_log and self.verbose_log_path:
+            try:
+                with open(self.verbose_log_path, "a", encoding="utf-8") as f:
+                    f.write(text)
+                    f.write(end)
+            except Exception:
+                pass
 
     def _log(self, step: int, action: str, parameters: dict, result: str):
         log_step(self.log_path, self.agent_name, self.provider, self.model, self.depth, step, action, parameters, result)
@@ -129,13 +149,26 @@ class Agent:
             "--log-path",
             child_log_path,
         ]
+        if self.provider_override:
+            cmd += ["--provider-override", self.provider_override]
         if self.verbose:
             cmd += ["--verbose"]
+        if self.verbose_log:
+            cmd += ["--verbose-log"]
+            if self.verbose_log_path:
+                cmd += ["--verbose-log-path", self.verbose_log_path]
 
         try:
+            if self.verbose_log and self.verbose_log_path:
+                self._vprint(f"[child cmd] {' '.join(cmd)}")
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=CHILD_AGENT_TIMEOUT)
-            if r.returncode == 0:
-                return f"FINAL_ANSWER: {r.stdout.strip()}"
+            if self.verbose_log and self.verbose_log_path:
+                if r.stdout:
+                    self._vprint(f"[child stdout]\n{r.stdout}")
+                if r.stderr:
+                    self._vprint(f"[child stderr]\n{r.stderr}")            
+                if r.returncode == 0:
+                    return f"FINAL_ANSWER: {r.stdout.strip()}"
             err = r.stderr.strip()[:400]
             return f"ERROR: child agent failed\n{r.returncode=}\n{err}"
         except subprocess.TimeoutExpired:
@@ -446,6 +479,8 @@ if __name__ == "__main__":
         verbose=args.verbose,
         log_path=args.log_path,
         provider=provider,
+        verbose_log=args.verbose_log,
+        verbose_log_path=args.verbose_log_path,
+        provider_override=args.provider_override,
     )
-
     agent.run(args.prompt)

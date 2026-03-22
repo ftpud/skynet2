@@ -14,6 +14,8 @@ def parse_args():
     parser.add_argument("--provider-override", default=None, choices=["openai", "claude"], help="force provider for all agents (overrides CLI and config)")
     parser.add_argument("--depth", type=int, default=0, help="current hierarchy depth (internal)")
     parser.add_argument("--log-path", default=None, help="internal: exact log file path (for child agents)")
+    parser.add_argument("--verbose-log-path", default=None, help="internal: shared verbose output log path (for child agents)")
+    parser.add_argument("--verbose-log", action="store_true", help="duplicate verbose output to a shared log file")
     parser.add_argument("-v", "--verbose", action="store_true", help="show detailed progress")
     return parser.parse_args()
 
