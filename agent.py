@@ -67,6 +67,7 @@ class Agent:
         self.max_context_messages = MAX_CONTEXT_MESSAGES
 
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.work_dir = os.getcwd()
         self.logs_dir = os.path.join(self.base_dir, "logs")
         os.makedirs(self.logs_dir, exist_ok=True)
 
@@ -74,7 +75,7 @@ class Agent:
             self.log_path = log_path
         else:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.log_path = os.path.join(self.logs_dir, f"{agent_name}_{ts}.jsonl")
+            self.log_path = os.path.join(self.logs_dir, f"{agent_name}_{ts}.l")
 
         if self.verbose_log_path is None and self.verbose_log:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -188,7 +189,7 @@ class Agent:
             result = subprocess.run(
                 script,
                 shell=True,
-                cwd=self.base_dir,
+                cwd=os.getcwd(),
                 env=env,
                 capture_output=not self.verbose,
                 text=True,
@@ -431,14 +432,15 @@ class Agent:
             cmds.extend([c for c in self.startup_observe_commands if isinstance(c, str) and c.strip()])
 
         for c in cmds:
-            obs = self.execute_command("linux_command", {"command": c}, step=0)
+            obs = self.execute_command("linux_command", {"command": f"cd {shlex.quote(self.work_dir)} && {c}"}, step=0)
             obs = obs[: self.max_output_chars] + "…" if len(obs) > self.max_output_chars else obs
             self.history.append({"role": "user", "content": f"Observation: {obs}"})
             self._log(0, "startup_observe", {"command": c}, obs)
 
     def run(self, initial_prompt: str):
-        self.history = [{"role": "user", "content": initial_prompt}]
+        self.history = []
         self._run_startup_observations()
+        self.history.append({"role": "user", "content": initial_prompt})
         step = 0
 
         while step < self.max_steps:
