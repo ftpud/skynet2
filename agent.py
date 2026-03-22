@@ -86,6 +86,7 @@ class Agent:
         self.agent_info = load_agents(self.base_dir)
         self.system_prompt = build_system_prompt(self.config, self.command_info, self.agent_info)
         self.run_hooks = config.get("hooks", {}) or {}
+        self.startup_observe_commands = config.get("startup_observe", []) or []
 
         self._run_hook("on_run_start")
 
@@ -424,8 +425,20 @@ class Agent:
 
         return full_response, in_tokens, out_tokens
 
+    def _run_startup_observations(self):
+        cmds = []
+        if isinstance(self.startup_observe_commands, list):
+            cmds.extend([c for c in self.startup_observe_commands if isinstance(c, str) and c.strip()])
+
+        for c in cmds:
+            obs = self.execute_command("linux_command", {"command": c}, step=0)
+            obs = obs[: self.max_output_chars] + "…" if len(obs) > self.max_output_chars else obs
+            self.history.append({"role": "user", "content": f"Observation: {obs}"})
+            self._log(0, "startup_observe", {"command": c}, obs)
+
     def run(self, initial_prompt: str):
         self.history = [{"role": "user", "content": initial_prompt}]
+        self._run_startup_observations()
         step = 0
 
         while step < self.max_steps:
@@ -561,6 +574,12 @@ if __name__ == "__main__":
     args = parse_args()
     script_dir = os.path.dirname(os.path.abspath(__file__))
     config, model, provider = load_runtime_config(args, script_dir)
+
+    if args.startup_observe:
+        existing = config.get("startup_observe", []) or []
+        if not isinstance(existing, list):
+            existing = []
+        config["startup_observe"] = existing + args.startup_observe
 
     agent = Agent(
         config=config,

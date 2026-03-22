@@ -17,6 +17,10 @@ permissions:
 
 allowed_agents: []
 
+startup_observe:
+  - ls
+  - cat project.md
+
 hooks:
   on_run_start: ""
   on_run_finish: ""

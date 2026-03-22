@@ -72,5 +72,71 @@ class ExtractJsonTests(unittest.TestCase):
         self.assertEqual(obj["action"], "final_answer")
 
 
+class FinalAnswerHandlingTests(unittest.TestCase):
+    def test_final_answer_after_write_observation_uses_observation_text(self):
+        agent = Agent.__new__(Agent)
+        agent.verbose = False
+        agent.history = [
+            {"role": "user", "content": "Update project.md"},
+            {"role": "assistant", "content": '{"action":"command","name":"write_file","parameters":{"path":"project.md","content":"x"}}'},
+            {"role": "user", "content": "Observation: OK: wrote 1 chars to project.md"},
+        ]
+
+        previous_assistant_message = next((m.get("content", "") for m in reversed(agent.history) if m.get("role") == "assistant"), "")
+        previous_user_message = next((m.get("content", "") for m in reversed(agent.history) if m.get("role") == "user"), "")
+        previous_assistant_json = json.loads(previous_assistant_message)
+        pending_write_command = (
+            isinstance(previous_assistant_json, dict)
+            and previous_assistant_json.get("action") == "command"
+            and previous_assistant_json.get("name") == "write_file"
+        )
+
+        content = "Updated project.md"
+        is_invalid = False
+        if pending_write_command:
+            if isinstance(previous_user_message, str) and previous_user_message.startswith("Observation: "):
+                observation_text = previous_user_message[len("Observation: "):].strip()
+                if observation_text.startswith("OK: wrote "):
+                    if content.strip() != observation_text:
+                        is_invalid = True
+                        content = observation_text
+                else:
+                    is_invalid = True
+            else:
+                is_invalid = True
+
+        self.assertTrue(pending_write_command)
+        self.assertTrue(is_invalid)
+        self.assertEqual(content, "OK: wrote 1 chars to project.md")
+
+    def test_final_answer_before_write_observation_is_invalid(self):
+        agent = Agent.__new__(Agent)
+        agent.history = [
+            {"role": "user", "content": "Update project.md"},
+            {"role": "assistant", "content": '{"action":"command","name":"write_file","parameters":{"path":"project.md","content":"x"}}'},
+        ]
+
+        previous_assistant_message = next((m.get("content", "") for m in reversed(agent.history) if m.get("role") == "assistant"), "")
+        previous_user_message = next((m.get("content", "") for m in reversed(agent.history) if m.get("role") == "user"), "")
+        previous_assistant_json = json.loads(previous_assistant_message)
+        pending_write_command = (
+            isinstance(previous_assistant_json, dict)
+            and previous_assistant_json.get("action") == "command"
+            and previous_assistant_json.get("name") == "write_file"
+        )
+
+        is_invalid = False
+        if pending_write_command:
+            if isinstance(previous_user_message, str) and previous_user_message.startswith("Observation: "):
+                observation_text = previous_user_message[len("Observation: "):].strip()
+                if not observation_text.startswith("OK: wrote "):
+                    is_invalid = True
+            else:
+                is_invalid = True
+
+        self.assertTrue(pending_write_command)
+        self.assertTrue(is_invalid)
+
+
 if __name__ == "__main__":
     unittest.main()

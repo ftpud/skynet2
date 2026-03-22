@@ -17,6 +17,7 @@ def parse_args():
     parser.add_argument("--verbose-log-path", default=None, help="internal: shared verbose output log path (for child agents)")
     parser.add_argument("--verbose-log", action="store_true", help="duplicate verbose output to a shared log file")
     parser.add_argument("-v", "--verbose", action="store_true", help="show detailed progress")
+    parser.add_argument("--startup-observe", action="append", default=[], help="command to run at startup and inject as Observation (repeatable)")
     return parser.parse_args()
 
 
