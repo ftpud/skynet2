@@ -1,4 +1,4 @@
-# Lightweight ReAct  Agent
+# Lightweight ReAct Agent
 
 A lightweight ReAct-style agent runtime that enforces a strict  action protocol, supports hierarchical child agents, and executes a controlled set of local commands.
 
@@ -70,14 +70,14 @@ Force provider/model:
 python agent.py --agent code --prompt "Do task" --provider openai --model gpt-4.1-mini
 ```
 
-## CLI Options
+## CLI Options (All Supported Runtime Flags)
 
 From `agent_cli.py`:
 
 - `--agent` (required): agent config name (without `.yaml`)
 - `--prompt` (required): initial task prompt
 - `--model`: override model from config
-- `--provider`: `openai` or `claude`
+- `--provider`: provider override for current run (`openai` or `claude`)
 - `--provider-override`: force provider for parent + child agents
 - `--depth`: internal nesting depth (used by runtime)
 - `--log-path`: internal explicit log path
@@ -86,73 +86,149 @@ From `agent_cli.py`:
 - `-v, --verbose`: print detailed progress
 - `--startup-observe`: repeatable shell command injected as initial Observation
 
-## Agent Configs (`agents/*.yaml`)
+## Configuration Reference (`agents/*.yaml`)
 
-Each agent YAML typically defines:
+Each agent YAML can define the following fields.
 
-- `role`
-- `description`
-- `model`
-- `provider` (optional, defaults to `openai`)
-- `permissions` (allowed command names)
-- `allowed_agents` (agents callable via `run_agent`)
-- `limits`:
-  - `max_steps`
-  - `max_depth`
-  - `max_children`
-- `temperature`
-- `max_tokens`
-- `base_system_prompt`
-- `hooks` (optional shell hooks)
+### Core Identity
 
-## Command Plugin Interface
+- `role` (string): short role name used in prompt framing
+- `description` (string): behavior and scope description
 
-Each command module in `commands/` should expose:
+### Model/Provider
 
-- `COMMAND_NAME` (str)
-- `DESCRIPTION` (str)
-- `USAGE_EXAMPLE` (str)
-- `execute(params: dict)` function (or `run(params: dict)` fallback)
+- `provider` (string, optional): `openai` or `claude` (defaults to `openai`)
+- `model` (string): model identifier for selected provider
+- `temperature` (number, optional): sampling temperature
+- `max_tokens` (integer, optional): output token cap
 
-Commands are auto-discovered at startup by `agent_loaders.load_commands()`.
+### Permissions and Routing
 
-## Runtime Behavior
+- `permissions` (list[string]): allowed command names this agent may execute
+- `allowed_agents` (list[string], optional): child agent names callable via `run_agent`
+
+### Limits
+
+- `limits.max_steps` (integer): max ReAct loop steps
+- `limits.max_depth` (integer): max child nesting depth
+- `limits.max_children` (integer): max number of child agent invocations
+
+### Prompting
+
+- `base_system_prompt` (string, optional): custom system prompt prefix/override
+
+### Hooks
+
+- `hooks` (object, optional): shell hooks executed at lifecycle points, e.g.:
+  - `on_run_start`
+  - `on_run_finish`
+  - (and other runtime-supported hook names)
+
+## Contracts
+
+This project relies on explicit contracts between runtime, model output, command plugins, and child agents.
+
+### 1) Model Output Contract
+
+Every model turn must resolve to exactly one  object:
+
+- Command action:
+
+```
+{"action":"command","name":"<command_name>","parameters":{}}
+```
+
+- Final answer action:
+
+```
+{"action":"final_answer","content":"plain text"}
+```
+
+Contract rules:
+
+- Exactly one top-level  object
+- `action` must be `command` or `final_answer`
+- `command` requires `name` and `parameters` object
+- `final_answer` requires `content`
+- Invalid output triggers extraction/retry/recovery logic
+
+### 2) Command Plugin Contract
+
+Each module in `commands/` must export:
+
+- `COMMAND_NAME: str`
+- `DESCRIPTION: str`
+- `USAGE_EXAMPLE: str`
+- `execute(params: dict)` function
+  - `run(params: dict)` may be used as fallback
+
+Behavioral contract:
+
+- Input is a -like dict (`parameters`)
+- Output must be serializable/loggable
+- Errors should be raised with clear messages for observation logging
+
+### 3) Agent Config Contract
+
+Agent YAML must be parseable and include required runtime fields for execution.
+
+Minimum practical contract:
+
+- identity (`role`, `description`)
+- model selection (`model`, optional `provider`)
+- execution policy (`permissions`)
+- safety bounds (`limits.*`)
+
+If provider is configured, matching API key must exist in environment.
+
+### 4) Child Agent (`run_agent`) Contract
+
+Parent-to-child invocation contract:
+
+- Child is launched as subprocess `python agent.py ...`
+- Depth is incremented and validated against `limits.max_depth`
+- Child count is validated against `limits.max_children`
+- Provider override behavior follows `--provider-override`
+- Child execution is time-bounded (timeout enforced)
+
+### 5) Logging Contract
+
+Runtime writes structured L logs (default under `logs/`):
+
+- Session start/end records
+- Per-step action + parameters + result/error
+- Token usage summary at end
+
+If verbose logging is enabled, console-style traces may also be mirrored to `--verbose-log-path`.
+
+### 6) Startup Observation Contract
+
+`--startup-observe` may be provided multiple times.
+
+For each command:
+
+- Shell command is executed before normal loop
+- Captured output is injected as an Observation
+- Observation becomes part of model-visible context
+
+## Runtime Flow
 
 1. Load selected agent YAML.
-2. Validate provider + API key.
-3. Build strict system prompt including allowed commands/agents.
+2. Validate provider and required API key.
+3. Build strict system prompt with allowed commands/agents.
 4. Optionally run startup observation commands.
-5. Iterate ReAct loop until:
+5. Execute ReAct loop until:
    - `final_answer`, or
    - max steps reached, or
    - unrecoverable parse failure.
-6. Log all steps and session summary to L.
+6. Persist session and step logs.
 
-## Logging
+## Security and Safety Notes
 
-Logs are written under `logs/` by default.
-
-- Session start/end entries
-- Per-step action/parameters/result entries
-- Token usage totals at session end
-
-Verbose mode can also be mirrored to a shared text log with `--verbose-log`.
-
-## Child Agents
-
-The `run_agent` command spawns a subprocess invocation of `agent.py` with incremented depth.
-
-Safety limits are enforced:
-
-- Maximum nesting depth
-- Maximum number of child agents
-- Child timeout
-
-## Notes
-
-- The runtime enforces strict  action format and retries on invalid model output.
 - Non-permitted commands are blocked at execution time.
-- Destructive shell behavior is discouraged by system prompt safety rules.
+- Strict action schema reduces malformed tool calls.
+- Destructive shell behavior is discouraged by system prompt policy.
+- Child-agent depth/count/time limits reduce runaway orchestration.
 
 ## Development
 
