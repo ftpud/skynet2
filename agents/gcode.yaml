@@ -31,27 +31,36 @@ hooks:
     if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       current_branch=$(git branch --show-current)
       previous_branch=$(git reflog --pretty=%gs | sed -n 's/checkout: moving from \([^ ]*\) to .*/\1/p' | head -n 1)
+
+      echo "Changed files (including created):"
+      git --no-pager status --short
+      printf "\n"
       git --no-pager diff --stat
       printf "\n"
       git --no-pager diff
-      printf "\nMerge changes? [accept/drop/exit]: "
+      printf "\nCreated files:\n"
+      git ls-files --others --exclude-standard
+
+      printf "\nMerge changes? [(a)ccept/(d)rop/(e)xit]: "
       read answer
       case "$answer" in
-        accept)
+        a)
           if [ -n "$previous_branch" ] && [ -n "$current_branch" ] && [ "$previous_branch" != "$current_branch" ]; then
             git checkout "$previous_branch" && git merge "$current_branch"
           else
             echo "Could not determine previous branch for merge."
           fi
           ;;
-        drop)
+        d)
           if [ -n "$previous_branch" ] && [ -n "$current_branch" ] && [ "$previous_branch" != "$current_branch" ]; then
+            git reset --hard
+            git clean -fd
             git checkout "$previous_branch" && git branch -D "$current_branch"
           else
             echo "Could not determine previous branch for drop."
           fi
           ;;
-        exit)
+        e)
           ;;
         *)
           echo "Unknown choice. Doing nothing."
