@@ -43,6 +43,7 @@ class Agent:
         self.provider_override = (provider_override.lower() if provider_override else None)
         self.verbose_log = verbose_log
         self.verbose_log_path = verbose_log_path
+        self._streaming_line_open = False
         if self.provider == "openai":
             self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         elif self.provider == "claude":
@@ -94,16 +95,60 @@ class Agent:
                 self._vprint(f"   verbose log  → {self.verbose_log_path}")
             self._vprint()
 
+    def _indent(self) -> str:
+        return "  " * self.depth
+
+    def _prefixed_text(self, text: str) -> str:
+        prefix = self._indent()
+        if not text:
+            return prefix
+        return "\n".join(f"{prefix}{line}" if line else prefix for line in text.split("\n"))
+
     def _vprint(self, text: str = "", end: str = "\n"):
+        formatted = self._prefixed_text(text)
         if self.verbose:
-            print(text, end=end, file=sys.stderr, flush=True)
+            print(formatted, end=end, file=sys.stderr, flush=True)
         if self.verbose_log and self.verbose_log_path:
             try:
                 with open(self.verbose_log_path, "a", encoding="utf-8") as f:
-                    f.write(text)
+                    f.write(formatted)
                     f.write(end)
             except Exception:
                 pass
+
+    def _vstream(self, text: str):
+        if not text:
+            return
+        prefix = self._indent()
+        chunks = []
+        for part in text.splitlines(keepends=True):
+            if not self._streaming_line_open:
+                chunks.append(prefix)
+                self._streaming_line_open = True
+            chunks.append(part)
+            if part.endswith("\n"):
+                self._streaming_line_open = False
+        rendered = "".join(chunks)
+        if self.verbose:
+            print(rendered, end="", file=sys.stderr, flush=True)
+        if self.verbose_log and self.verbose_log_path:
+            try:
+                with open(self.verbose_log_path, "a", encoding="utf-8") as f:
+                    f.write(rendered)
+            except Exception:
+                pass
+
+    def _vend_stream(self):
+        if self._streaming_line_open:
+            if self.verbose:
+                print(file=sys.stderr, flush=True)
+            if self.verbose_log and self.verbose_log_path:
+                try:
+                    with open(self.verbose_log_path, "a", encoding="utf-8") as f:
+                        f.write("\n")
+                except Exception:
+                    pass
+            self._streaming_line_open = False
 
     def _log(self, step: int, action: str, parameters: dict, result: str):
         log_step(self.log_path, self.agent_name, self.provider, self.model, self.depth, step, action, parameters, result)
@@ -151,8 +196,6 @@ class Agent:
         ]
         if self.provider_override:
             cmd += ["--provider-override", self.provider_override]
-        if self.verbose:
-            cmd += ["--verbose"]
         if self.verbose_log:
             cmd += ["--verbose-log"]
             if self.verbose_log_path:
@@ -163,12 +206,14 @@ class Agent:
                 self._vprint(f"[child cmd] {' '.join(cmd)}")
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=CHILD_AGENT_TIMEOUT)
             if self.verbose_log and self.verbose_log_path:
-                if r.stdout:
-                    self._vprint(f"[child stdout]\n{r.stdout}")
                 if r.stderr:
-                    self._vprint(f"[child stderr]\n{r.stderr}")            
-                if r.returncode == 0:
-                    return f"FINAL_ANSWER: {r.stdout.strip()}"
+                    self._vprint(f"[child stderr]\n{r.stderr.rstrip()}")
+                if r.stdout:
+                    child_stdout = r.stdout.rstrip()
+                    final_line = child_stdout.splitlines()[-1] if child_stdout else ""
+                    self._vprint(f"[child final answer]\n{final_line}")
+            if r.returncode == 0:
+                return f"FINAL_ANSWER: {r.stdout.strip()}"
             err = r.stderr.strip()[:400]
             return f"ERROR: child agent failed\n{r.returncode=}\n{err}"
         except subprocess.TimeoutExpired:
@@ -217,16 +262,15 @@ class Agent:
             ) as stream:
                 for event in stream:
                     if event.type == "response.output_text.delta":
-                        if self.verbose:
-                            print(event.delta, end="", flush=True, file=sys.stderr)
+                        self._vstream(event.delta)
                         full_response += event.delta
                         parsed_early = self._extract_json(full_response)
                         if parsed_early is not None:
                             break
-
                 final_response = stream.get_final_response()
                 usage = getattr(final_response, "usage", None)
                 in_tokens, out_tokens = self._extract_usage(usage, "responses")
+                self._vend_stream()
                 if parsed_early is not None:
                     return __import__("json").dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
                 return full_response, in_tokens, out_tokens
@@ -244,18 +288,20 @@ class Agent:
                 stream_options={"include_usage": True},
             )
             usage = None
+            in_tokens, out_tokens = 0, 0
             for chunk in stream:
                 if hasattr(chunk, "usage") and chunk.usage is not None:
                     usage = chunk.usage
                 delta = chunk.choices[0].delta.content if chunk.choices else None
                 delta = delta or ""
-                if self.verbose and delta:
-                    print(delta, end="", flush=True, file=sys.stderr)
+                if delta:
+                    self._vstream(delta)
                 full_response += delta
                 parsed_early = self._extract_json(full_response)
                 if parsed_early is not None:
                     continue
-            in_tokens, out_tokens = self._extract_usage(usage, "chat_completions")
+                in_tokens, out_tokens = self._extract_usage(usage, "chat_completions")
+            self._vend_stream()
             if parsed_early is not None:
                 return __import__("json").dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
             return full_response, in_tokens, out_tokens
@@ -290,8 +336,8 @@ class Agent:
                 max_tokens=claude_max_tokens,
             ) as stream:
                 for text in stream.text_stream:
-                    if self.verbose and text:
-                        print(text, end="", flush=True, file=sys.stderr)
+                    if text:
+                        self._vstream(text)
                     full_response += text
                     parsed_early = self._extract_json(full_response)
                     if parsed_early is not None:
@@ -309,7 +355,6 @@ class Agent:
                         except Exception:
                             pass
                         break
-
                 if parsed_early is None:
                     try:
                         message = stream.get_final_message()
@@ -318,6 +363,7 @@ class Agent:
                         stop_reason = getattr(message, "stop_reason", None)
                     except Exception:
                         pass
+            self._vend_stream()
 
             if parsed_early is not None:
                 return __import__("json").dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
@@ -325,7 +371,7 @@ class Agent:
             if stop_reason == "max_tokens" and claude_max_tokens < max_claude_tokens:
                 new_limit = min(claude_max_tokens * 2, max_claude_tokens)
                 if self.verbose:
-                    print(f"   [claude] truncated at {claude_max_tokens} tokens → retrying with {new_limit}", file=sys.stderr)
+                    print(f"{self._indent()}   [claude] truncated at {claude_max_tokens} tokens → retrying with {new_limit}", file=sys.stderr)
                 claude_max_tokens = new_limit
                 time.sleep(0.3)
                 continue
@@ -341,22 +387,23 @@ class Agent:
         while step < self.max_steps:
             step += 1
             if self.verbose:
-                print(f"[{step:2d}] Calling {self.provider}:{self.model} …", file=sys.stderr)
+                print(f"{self._indent()}[{step:2d}] Calling {self.provider}:{self.model} …", file=sys.stderr)
 
             messages = [{"role": "system", "content": self.system_prompt}] + self.history[-self.max_context_messages :]
 
             parsed = None
             for attempt in range(1, MAX_RETRIES_PER_STEP + 1):
                 if self.verbose and attempt > 1:
-                    print(f"   retry {attempt}/{MAX_RETRIES_PER_STEP}", file=sys.stderr)
+                    print(f"{self._indent()}   retry {attempt}/{MAX_RETRIES_PER_STEP}", file=sys.stderr)
 
                 try:
                     full_response, in_tokens, out_tokens = self._call_model(messages)
                     self.session_tokens_in += in_tokens
                     self.session_tokens_out += out_tokens
                 except Exception as e:
+                    self._vend_stream()
                     if self.verbose:
-                        print(f"   API error: {e}", file=sys.stderr)
+                        print(f"{self._indent()}   API error: {e}", file=sys.stderr)
                     time.sleep(0.7)
                     continue
 
@@ -373,7 +420,7 @@ class Agent:
 
             if not parsed:
                 if self.verbose:
-                    print(" → Parsing failed after all retries", file=sys.stderr)
+                    print(f"{self._indent()} → Parsing failed after all retries", file=sys.stderr)
                 self._log(step, "parse_failure", {}, "Max retries reached")
                 print("ERROR: Could not parse valid JSON after retries.")
                 self._log_session_end()
@@ -393,7 +440,7 @@ class Agent:
                 self.recent_actions.pop(0)
             if len(self.recent_actions) == 3 and len({__import__("json").dumps(d, sort_keys=True) for d in self.recent_actions}) == 1:
                 if self.verbose:
-                    print(" → Loop detected — forcing final answer", file=sys.stderr)
+                    print(f"{self._indent()} → Loop detected — forcing final answer", file=sys.stderr)
                 print("Agent appears stuck in loop. Terminating.")
                 self._log_session_end()
                 return
@@ -414,7 +461,7 @@ class Agent:
 
                 if is_invalid:
                     if self.verbose:
-                        print(" → Invalid final_answer (wrapped JSON), retrying...", file=sys.stderr)
+                        print(f"{self._indent()} → Invalid final_answer (wrapped JSON), retrying...", file=sys.stderr)
 
                     error_feedback = (
                         "INVALID OUTPUT:\n"
@@ -429,7 +476,7 @@ class Agent:
                     continue
 
                 if self.verbose:
-                    print("\n → Final answer:", file=sys.stderr)
+                    print(f"\n{self._indent()} → Final answer:", file=sys.stderr)
 
                 print(content)
                 self._log(step, "final_answer", {}, content)
@@ -443,7 +490,7 @@ class Agent:
                     obs = "ERROR: this command is not permitted"
                 else:
                     if self.verbose:
-                        print(f" → {name} {params}", file=sys.stderr)
+                        print(f"{self._indent()} → {name} {params}", file=sys.stderr)
                     obs = self.execute_command(name, params, step)
 
                 obs = obs[: self.max_output_chars] + "…" if len(obs) > self.max_output_chars else obs
@@ -455,13 +502,13 @@ class Agent:
                     self._log(step, name, params, obs)
 
                 if self.verbose:
-                    print(f"   ↳ {obs[:120]}{'…' if len(obs) > 120 else ''}", file=sys.stderr)
+                    print(f"{self._indent()}   ↳ {obs[:120]}{'…' if len(obs) > 120 else ''}", file=sys.stderr)
 
             else:
                 self.history.append({"role": "user", "content": "Invalid action — must be 'command' or 'final_answer'"})
 
         if self.verbose:
-            print(f"Reached max steps ({self.max_steps}) without final answer.", file=sys.stderr)
+            print(f"{self._indent()}Reached max steps ({self.max_steps}) without final answer.", file=sys.stderr)
         self._log(step, "max_steps_reached", {}, "terminated without final_answer")
         print("Agent reached maximum step limit without producing a final answer.")
 

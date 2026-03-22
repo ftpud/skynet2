@@ -53,7 +53,7 @@ def execute(parameters: dict) -> str:
         if line_count == 0:
             return "ERROR: file is empty"
 
-        replacements: list[tuple[int, int, str]] = []
+        validated_replacements: list[tuple[int, int, str]] = []
         seen_ranges: set[tuple[int, int]] = set()
 
         for i, block in enumerate(blocks, start=1):
@@ -95,36 +95,36 @@ def execute(parameters: dict) -> str:
             if not block_lines:
                 return f"ERROR: blocks[{i}] resolved to empty block"
 
-            actual_first = block_lines[0].rstrip("\r\n")
-            actual_last = block_lines[-1].rstrip("\r\n")
+            actual_first = block_lines[0].rstrip("\r\n").strip()
+            actual_last = block_lines[-1].rstrip("\r\n").strip()
 
-            if actual_first != first_block_line:
+            if actual_first != first_block_line.strip():
                 return f"ERROR: blocks[{i}] first line mismatch"
-            if actual_last != last_block_line:
+            if actual_last != last_block_line.strip():
                 return f"ERROR: blocks[{i}] last line mismatch"
 
-            replacements.append((start - 1, end, replace_with))
+            if replace_with and not replace_with.endswith(("\n", "\r")):
+                replace_with += "\n"
 
-        replacements.sort(key=lambda item: item[0])
-        for idx in range(1, len(replacements)):
-            prev_start, prev_end, _ = replacements[idx - 1]
-            curr_start, curr_end, _ = replacements[idx]
+            validated_replacements.append((start - 1, end, replace_with))
+
+        validated_replacements.sort(key=lambda item: item[0])
+        for idx in range(1, len(validated_replacements)):
+            prev_start, prev_end, _ = validated_replacements[idx - 1]
+            curr_start, curr_end, _ = validated_replacements[idx]
             if curr_start < prev_end:
                 return "ERROR: block ranges overlap; aborting for safety"
 
-        updated_parts = []
-        cursor = 0
-        for start_idx, end_idx, replace_with in replacements:
-            updated_parts.append("".join(lines[cursor:start_idx]))
-            updated_parts.append(replace_with)
-            cursor = end_idx
-        updated_parts.append("".join(lines[cursor:]))
-        updated = "".join(updated_parts)
+        updated_lines = list(lines)
+        for start_idx, end_idx, replace_with in reversed(validated_replacements):
+            replacement_lines = replace_with.splitlines(keepends=True)
+            updated_lines[start_idx:end_idx] = replacement_lines
+        updated = "".join(updated_lines)
 
         with open(target, "w", encoding="utf-8") as f:
             f.write(updated)
 
-        return f"OK: replaced {len(replacements)} block(s) in {path}"
+        return f"OK: replaced {len(validated_replacements)} block(s) in {path}"
     except UnicodeDecodeError:
         return "ERROR: file is not valid UTF-8 text"
     except Exception as e:
