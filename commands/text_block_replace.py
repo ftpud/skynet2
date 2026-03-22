@@ -28,28 +28,44 @@ def _normalize_lines(value, field_name: str, block_index: int):
     return normalized, None
 
 
+def _build_normalized_index(lines: list[str]) -> tuple[list[str], list[int]]:
+    normalized_lines: list[str] = []
+    line_indexes: list[int] = []
+
+    for idx, line in enumerate(lines):
+        normalized = line.rstrip("\r\n").strip()
+        if not normalized:
+            continue
+        normalized_lines.append(normalized)
+        line_indexes.append(idx)
+
+    return normalized_lines, line_indexes
+
+
 def _find_matches(lines: list[str], first_lines: list[str], last_lines: list[str]) -> list[tuple[int, int]]:
     first_len = len(first_lines)
     last_len = len(last_lines)
     matches: list[tuple[int, int]] = []
+    normalized_lines, line_indexes = _build_normalized_index(lines)
 
-    for start in range(len(lines)):
-        if start + first_len > len(lines):
+    for start in range(len(normalized_lines)):
+        if start + first_len > len(normalized_lines):
             break
 
-        first_segment = [line.rstrip("\r\n").strip() for line in lines[start : start + first_len]]
+        first_segment = normalized_lines[start : start + first_len]
         if first_segment != first_lines:
             continue
 
-        for end_start in range(start + first_len - 1, len(lines)):
-            if end_start + last_len > len(lines):
+        for end_start in range(start + first_len - 1, len(normalized_lines)):
+            if end_start + last_len > len(normalized_lines):
                 break
-            last_segment = [line.rstrip("\r\n").strip() for line in lines[end_start : end_start + last_len]]
+            last_segment = normalized_lines[end_start : end_start + last_len]
             if last_segment == last_lines:
-                matches.append((start, end_start + last_len))
+                actual_start = line_indexes[start]
+                actual_end = line_indexes[end_start + last_len - 1] + 1
+                matches.append((actual_start, actual_end))
 
     return matches
-
 
 def execute(parameters: dict) -> str:
     try:
