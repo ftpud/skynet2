@@ -1,29 +1,54 @@
 import os
 
 COMMAND_NAME = "text_block_replace"
-DESCRIPTION = "Replace one or more line-range blocks in a UTF-8 text file with safety validation. Do not use for full file rewrite."
-USAGE_EXAMPLE = '{"action":"command","name":"text_block_replace","parameters":{"path":"notes.txt","blocks":[{"line_range":"10-15","replace_with":"new text","first_block_line":"start marker","last_block_line":"end marker"}]}}'
+DESCRIPTION = "Replace one or more anchor-based blocks in a UTF-8 text file with safety validation."
+USAGE_EXAMPLE = '{"action":"command","name":"text_block_replace","parameters":{"path":"notes.txt","blocks":[{"first_block_lines":["start marker"],"last_block_lines":["end marker"],"replace_with":"new text"}]}}'
 
 
-def _parse_line_range(value) -> tuple[int, int] | tuple[None, None]:
+def _normalize_lines(value, field_name: str, block_index: int):
+    if value is None:
+        return None, f"ERROR: blocks[{block_index}].{field_name} is required"
+
     if isinstance(value, str):
-        parts = value.split("-", 1)
-        if len(parts) != 2:
-            return None, None
-        try:
-            start = int(parts[0].strip())
-            end = int(parts[1].strip())
-        except Exception:
-            return None, None
-        return start, end
+        items = [value]
+    elif isinstance(value, list) and value:
+        items = value
+    else:
+        return None, f"ERROR: blocks[{block_index}].{field_name} must be a non-empty string or list of strings"
 
-    if isinstance(value, (list, tuple)) and len(value) == 2:
-        try:
-            return int(value[0]), int(value[1])
-        except Exception:
-            return None, None
+    normalized = []
+    for item in items:
+        if not isinstance(item, str):
+            item = str(item)
+        normalized.append(item.strip())
 
-    return None, None
+    if not any(normalized):
+        return None, f"ERROR: blocks[{block_index}].{field_name} cannot be empty"
+
+    return normalized, None
+
+
+def _find_matches(lines: list[str], first_lines: list[str], last_lines: list[str]) -> list[tuple[int, int]]:
+    first_len = len(first_lines)
+    last_len = len(last_lines)
+    matches: list[tuple[int, int]] = []
+
+    for start in range(len(lines)):
+        if start + first_len > len(lines):
+            break
+
+        first_segment = [line.rstrip("\r\n").strip() for line in lines[start : start + first_len]]
+        if first_segment != first_lines:
+            continue
+
+        for end_start in range(start + first_len - 1, len(lines)):
+            if end_start + last_len > len(lines):
+                break
+            last_segment = [line.rstrip("\r\n").strip() for line in lines[end_start : end_start + last_len]]
+            if last_segment == last_lines:
+                matches.append((start, end_start + last_len))
+
+    return matches
 
 
 def execute(parameters: dict) -> str:
@@ -49,81 +74,49 @@ def execute(parameters: dict) -> str:
             content = f.read()
 
         lines = content.splitlines(keepends=True)
-        line_count = len(lines)
-        if line_count == 0:
+        if not lines:
             return "ERROR: file is empty"
 
         validated_replacements: list[tuple[int, int, str]] = []
-        seen_ranges: set[tuple[int, int]] = set()
 
         for i, block in enumerate(blocks, start=1):
             if not isinstance(block, dict):
                 return f"ERROR: blocks[{i}] must be an object"
 
-            start, end = _parse_line_range(block.get("line_range"))
-            if start is None or end is None:
-                return f"ERROR: blocks[{i}].line_range must be like '10-15' or [10,15]"
-            if start < 1 or end < start:
-                return f"ERROR: blocks[{i}].line_range is invalid"
-            if end > line_count:
-                return f"ERROR: blocks[{i}].line_range exceeds file length ({line_count} lines)"
+            first_lines, err = _normalize_lines(block.get("first_block_lines", block.get("first_block_line")), "first_block_lines", i)
+            if err:
+                return err
 
-            range_key = (start - 1, end)
-            if range_key in seen_ranges:
-                return "ERROR: duplicate block range; aborting for safety"
-            seen_ranges.add(range_key)
+            last_lines, err = _normalize_lines(block.get("last_block_lines", block.get("last_block_line")), "last_block_lines", i)
+            if err:
+                return err
 
-            first_block_line = block.get("first_block_line")
-            last_block_line = block.get("last_block_line")
             replace_with = block.get("replace_with")
-
-            if first_block_line is None:
-                return f"ERROR: blocks[{i}].first_block_line is required"
-            if last_block_line is None:
-                return f"ERROR: blocks[{i}].last_block_line is required"
             if replace_with is None:
                 return f"ERROR: blocks[{i}].replace_with is required"
-
-            if not isinstance(first_block_line, str):
-                first_block_line = str(first_block_line)
-            if not isinstance(last_block_line, str):
-                last_block_line = str(last_block_line)
             if not isinstance(replace_with, str):
                 replace_with = str(replace_with)
 
-            block_lines = lines[start - 1 : end]
-            if not block_lines:
-                return f"ERROR: blocks[{i}] resolved to empty block"
+            matches = _find_matches(lines, first_lines, last_lines)
+            if not matches:
+                return f"ERROR: blocks[{i}] anchor block not found"
 
-            first_idx = 0
-            while first_idx < len(block_lines) and block_lines[first_idx].rstrip("\r\n").strip() == "":
-                first_idx += 1
-            if first_idx >= len(block_lines):
-                return f"ERROR: blocks[{i}] contains only empty lines"
+            if len(matches) > 1:
+                first_content = ["".join(lines[s:e]) for s, e in matches]
+                if len(set(first_content)) != 1:
+                    return f"ERROR: blocks[{i}] multiple different blocks matched same anchors; aborting for safety"
 
-            last_idx = len(block_lines) - 1
-            while last_idx >= 0 and block_lines[last_idx].rstrip("\r\n").strip() == "":
-                last_idx -= 1
-            if last_idx < 0:
-                return f"ERROR: blocks[{i}] contains only empty lines"
-
-            actual_first = block_lines[first_idx].rstrip("\r\n").strip()
-            actual_last = block_lines[last_idx].rstrip("\r\n").strip()
-
-            if actual_first != first_block_line.strip():
-                return f"ERROR: blocks[{i}] first line mismatch; Actual: [{actual_first}] Provided: [{first_block_line.strip()}]"
-            if actual_last != last_block_line.strip():
-                return f"ERROR: blocks[{i}] last line mismatch; Actual: [{actual_last}] Provided: [{last_block_line.strip()}]"
+            start_idx, end_idx = matches[0]
 
             if replace_with and not replace_with.endswith(("\n", "\r")):
                 replace_with += "\n"
 
-            validated_replacements.append((start - 1, end, replace_with))
+            validated_replacements.append((start_idx, end_idx, replace_with))
 
         validated_replacements.sort(key=lambda item: item[0])
         for idx in range(1, len(validated_replacements)):
-            prev_start, prev_end, _ = validated_replacements[idx - 1]
-            curr_start, curr_end, _ = validated_replacements[idx]
+            _, prev_end, _ = validated_replacements[idx - 1]
+            curr_start, _, _ = validated_replacements[idx]
             if curr_start < prev_end:
                 return "ERROR: block ranges overlap; aborting for safety"
 
@@ -131,10 +124,9 @@ def execute(parameters: dict) -> str:
         for start_idx, end_idx, replace_with in reversed(validated_replacements):
             replacement_lines = replace_with.splitlines(keepends=True)
             updated_lines[start_idx:end_idx] = replacement_lines
-        updated = "".join(updated_lines)
 
         with open(target, "w", encoding="utf-8") as f:
-            f.write(updated)
+            f.write("".join(updated_lines))
 
         return f"OK: replaced {len(validated_replacements)} block(s) in {path}"
     except UnicodeDecodeError:

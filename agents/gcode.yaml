@@ -36,36 +36,45 @@ hooks:
       git --no-pager status --short
       printf "\n"
       git --no-pager diff --stat
-      printf "\n"
-      git --no-pager diff
       printf "\nCreated files:\n"
       git ls-files --others --exclude-standard
 
-      printf "\nMerge changes? [(a)ccept/(d)rop/(e)xit]: "
-      read answer
-      case "$answer" in
-        a)
-          if [ -n "$previous_branch" ] && [ -n "$current_branch" ] && [ "$previous_branch" != "$current_branch" ]; then
-            git checkout "$previous_branch" && git merge "$current_branch"
-          else
-            echo "Could not determine previous branch for merge."
-          fi
-          ;;
-        d)
-          if [ -n "$previous_branch" ] && [ -n "$current_branch" ] && [ "$previous_branch" != "$current_branch" ]; then
-            git reset --hard
-            git clean -fd
-            git checkout "$previous_branch" && git branch -D "$current_branch"
-          else
-            echo "Could not determine previous branch for drop."
-          fi
-          ;;
-        e)
-          ;;
-        *)
-          echo "Unknown choice. Doing nothing."
-          ;;
-      esac
+      while true; do
+        printf "\nMerge changes? [(A)ccept/(d)iff/(x)drop/(e)xit]: "
+        IFS= read -r -n 1 answer
+        printf "\n"
+        answer=${answer:-A}
+        case "$answer" in
+          A|a)
+            if [ -n "$previous_branch" ] && [ -n "$current_branch" ] && [ "$previous_branch" != "$current_branch" ]; then
+              git checkout "$previous_branch" && git merge "$current_branch"
+            else
+              echo "Could not determine previous branch for merge."
+            fi
+            break
+            ;;
+          d|D)
+            git --no-pager diff
+            ;;
+          x|X)
+            if [ -n "$previous_branch" ] && [ -n "$current_branch" ] && [ "$previous_branch" != "$current_branch" ]; then
+              git reset --hard
+              git clean -fd
+              git checkout "$previous_branch" && git branch -D "$current_branch"
+            else
+              echo "Could not determine previous branch for drop."
+            fi
+            break
+            ;;
+          e|E)
+            break
+            ;;
+          *)
+            echo "Unknown choice. Doing nothing."
+            break
+            ;;
+        esac
+      done
     fi
 
 base_system_prompt: |
