@@ -429,17 +429,32 @@ class Agent:
     def _run_startup_observations(self):
         cmds = []
         if isinstance(self.startup_observe_commands, list):
-            cmds.extend([c for c in self.startup_observe_commands if isinstance(c, str) and c.strip()])
-
+            cmds.extend([
+                c for c in self.startup_observe_commands
+                if isinstance(c, str) and c.strip()
+            ])
+        results = []
         for c in cmds:
-            obs = self.execute_command("linux_command", {"command": f"cd {shlex.quote(self.work_dir)} && {c}"}, step=0)
-            obs = obs[: self.max_output_chars] + "…" if len(obs) > self.max_output_chars else obs
-            self.history.append({"role": "user", "content": f"Observation: {obs}"})
-            self._log(0, "startup_observe", {"command": c}, obs)
+            obs = self.execute_command(
+                "linux_command",
+                {"command": f"cd {shlex.quote(self.work_dir)} && {c}"},
+                step=0
+            )
+            obs = obs[: self.max_output_chars]
+            results.append(f"$ {c}\n{obs}")
+        return "\n\n".join(results)
 
     def run(self, initial_prompt: str):
         self.history = []
-        self._run_startup_observations()
+        startup_context = self._run_startup_observations()
+
+        if startup_context:
+            self.environment_context = startup_context
+        else:
+            self.environment_context = ""
+
+
+
         self.history.append({"role": "user", "content": initial_prompt})
         step = 0
 
@@ -448,7 +463,15 @@ class Agent:
             if self.verbose:
                 print(f"{self._indent()}[{step:2d}] Calling {self.provider}:{self.model} …", file=sys.stderr)
 
-            messages = [{"role": "system", "content": self.system_prompt}] + self.history[-self.max_context_messages :]
+            #messages = [{"role": "system", "content": self.system_prompt}] + self.history[-self.max_context_messages :]
+
+            messages = [{
+                "role": "system",
+                "content":
+                    self.system_prompt
+                    + "\n\nENVIRONMENT:\n"
+                    + self.environment_context
+            }] + self.history[-self.max_context_messages:]
 
             parsed = None
             for attempt in range(1, MAX_RETRIES_PER_STEP + 1):
