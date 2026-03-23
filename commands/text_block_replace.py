@@ -1,7 +1,7 @@
 import os
 
 COMMAND_NAME = "text_block_replace"
-DESCRIPTION = "Replace one or more anchor-based blocks in a UTF-8 text file with safety validation. Use 3-4 lines for markers."
+DESCRIPTION = "Replace one or more anchor-based blocks in a UTF-8 text file with safety validation. Use 3-4 lines or function names for markers."
 USAGE_EXAMPLE = '{"action":"command","name":"text_block_replace","parameters":{"path":"notes.txt","blocks":[{"first_block_lines":["start marker"],"last_block_lines":["end marker"],"replace_with":"new text"}]}}'
 
 
@@ -20,7 +20,9 @@ def _normalize_lines(value, field_name: str, block_index: int):
     for item in items:
         if not isinstance(item, str):
             item = str(item)
-        normalized.append(item.strip())
+        # === HEURISTIC: collapse all whitespace (fixes AI spacing quirks) ===
+        collapsed = ' '.join(item.strip().split())
+        normalized.append(collapsed)
 
     if not any(normalized):
         return None, f"ERROR: blocks[{block_index}].{field_name} cannot be empty"
@@ -33,7 +35,8 @@ def _build_normalized_index(lines: list[str]) -> tuple[list[str], list[int]]:
     line_indexes: list[int] = []
 
     for idx, line in enumerate(lines):
-        normalized = line.rstrip("\r\n").strip()
+        # === HEURISTIC: same collapse as anchors ===
+        normalized = ' '.join(line.rstrip("\r\n").strip().split())
         if not normalized:
             continue
         normalized_lines.append(normalized)
@@ -51,21 +54,19 @@ def _find_matches(lines: list[str], first_lines: list[str], last_lines: list[str
     for start in range(len(normalized_lines)):
         if start + first_len > len(normalized_lines):
             break
-
-        first_segment = normalized_lines[start : start + first_len]
-        if first_segment != first_lines:
+        if normalized_lines[start : start + first_len] != first_lines:
             continue
 
         for end_start in range(start + first_len - 1, len(normalized_lines)):
             if end_start + last_len > len(normalized_lines):
                 break
-            last_segment = normalized_lines[end_start : end_start + last_len]
-            if last_segment == last_lines:
+            if normalized_lines[end_start : end_start + last_len] == last_lines:
                 actual_start = line_indexes[start]
                 actual_end = line_indexes[end_start + last_len - 1] + 1
                 matches.append((actual_start, actual_end))
 
     return matches
+
 
 def execute(parameters: dict) -> str:
     try:
@@ -93,6 +94,9 @@ def execute(parameters: dict) -> str:
         if not lines:
             return "ERROR: file is empty"
 
+        # === NEW: detect original line ending so replacement never messes whitespace ===
+        original_eol = '\r\n' if '\r\n' in content else '\n'
+
         validated_replacements: list[tuple[int, int, str]] = []
 
         for i, block in enumerate(blocks, start=1):
@@ -113,6 +117,11 @@ def execute(parameters: dict) -> str:
             if not isinstance(replace_with, str):
                 replace_with = str(replace_with)
 
+            # Normalize replace_with newlines to match file (prevents mixed EOL mess)
+            replace_with = replace_with.replace('\r\n', '\n').replace('\r', '\n')
+            if replace_with and not replace_with.endswith('\n'):
+                replace_with += '\n'
+
             matches = _find_matches(lines, first_lines, last_lines)
             if not matches:
                 return f"ERROR: blocks[{i}] anchor block not found"
@@ -123,10 +132,6 @@ def execute(parameters: dict) -> str:
                     return f"ERROR: blocks[{i}] multiple different blocks matched same anchors; aborting for safety"
 
             start_idx, end_idx = matches[0]
-
-            if replace_with and not replace_with.endswith(("\n", "\r")):
-                replace_with += "\n"
-
             validated_replacements.append((start_idx, end_idx, replace_with))
 
         validated_replacements.sort(key=lambda item: item[0])
@@ -138,7 +143,11 @@ def execute(parameters: dict) -> str:
 
         updated_lines = list(lines)
         for start_idx, end_idx, replace_with in reversed(validated_replacements):
-            replacement_lines = replace_with.splitlines(keepends=True)
+            # Build lines with original EOL
+            if replace_with:
+                replacement_lines = [line + original_eol for line in replace_with.splitlines()]
+            else:
+                replacement_lines = []
             updated_lines[start_idx:end_idx] = replacement_lines
 
         with open(target, "w", encoding="utf-8") as f:
