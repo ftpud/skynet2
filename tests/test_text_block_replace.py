@@ -3,50 +3,116 @@ from pathlib import Path
 from commands.text_block_replace import execute
 
 
-def test_text_block_replace_rejects_duplicate_ranges(tmp_path: Path):
-    path = tmp_path / "sample.txt"
-    path.write_text("a\nb\nc\n", encoding="utf-8")
-
-    result = execute(
-        {
-            "path": str(path),
-            "blocks": [
-                {
-                    "line_range": "1-2",
-                    "first_block_line": "a",
-                    "last_block_line": "b",
-                    "replace_with": "x\ny\n",
-                },
-                {
-                    "line_range": "1-2",
-                    "first_block_line": "a",
-                    "last_block_line": "b",
-                    "replace_with": "z\n",
-                },
-            ],
-        }
+def test_text_block_replace_on_fortest_add_function(tmp_path: Path):
+    path = tmp_path / "fortest.py"
+    path.write_text(
+        "def greet(name):\n"
+        "    return f\"Hello, {name}!\"\n\n\n"
+        "def add(a, b):\n"
+        "    return a + b + 1\n",
+        encoding="utf-8",
     )
 
-    assert result == "ERROR: duplicate block range; aborting for safety"
-
-
-def test_text_block_replace_accepts_single_line_file_without_trailing_newline(tmp_path: Path):
-    path = tmp_path / "sample.txt"
-    path.write_text("only line", encoding="utf-8")
-
     result = execute(
         {
             "path": str(path),
             "blocks": [
                 {
-                    "line_range": "1-1",
-                    "first_block_line": "only line",
-                    "last_block_line": "only line",
-                    "replace_with": "updated",
+                    "first_block_lines": ["def add(a, b):"],
+                    "last_block_lines": ["    return a + b + 1"],
+                    "replace_with": "def add(a, b):\n    return a + b",
                 }
             ],
         }
     )
 
-    assert result.startswith("OK: replaced 1 block(s)")
-    assert path.read_text(encoding="utf-8") == "updated"
+    assert result == "OK: patched 1 block(s)"
+    assert "return a + b\n" in path.read_text(encoding="utf-8")
+
+
+def test_text_block_replace_multiple_blocks_on_fortest(tmp_path: Path):
+    path = tmp_path / "fortest.py"
+    path.write_text(
+        "def greet(name):\n"
+        "    return f\"Hello, {name}!\"\n\n\n"
+        "def add(a, b):\n"
+        "    return a + b + 1\n",
+        encoding="utf-8",
+    )
+
+    result = execute(
+        {
+            "path": str(path),
+            "blocks": [
+                {
+                    "first_block_lines": ["def greet(name):"],
+                    "last_block_lines": ["    return f\"Hello, {name}!\""],
+                    "replace_with": "def greet(name):\n    return f\"Hi, {name}!\"",
+                },
+                {
+                    "first_block_lines": ["def add(a, b):"],
+                    "last_block_lines": ["    return a + b + 1"],
+                    "replace_with": "def add(a, b):\n    return a + b",
+                },
+            ],
+        }
+    )
+
+    content = path.read_text(encoding="utf-8")
+    assert result == "OK: patched 2 block(s)"
+    assert "return f\"Hi, {name}!\"\n" in content
+    assert "return a + b\n" in content
+
+
+def test_text_block_replace_missing_anchor_returns_error(tmp_path: Path):
+    path = tmp_path / "fortest.py"
+    path.write_text(
+        "def greet(name):\n"
+        "    return f\"Hello, {name}!\"\n\n\n"
+        "def add(a, b):\n"
+        "    return a + b + 1\n",
+        encoding="utf-8",
+    )
+
+    result = execute(
+        {
+            "path": str(path),
+            "blocks": [
+                {
+                    "first_block_lines": ["def subtract(a, b):"],
+                    "last_block_lines": ["    return a - b"],
+                    "replace_with": "def subtract(a, b):\n    return a - b",
+                }
+            ],
+        }
+    )
+
+    assert result == "ERROR: block[0] not found"
+
+
+def test_text_block_replace_empty_replace_removes_block(tmp_path: Path):
+    path = tmp_path / "fortest.py"
+    path.write_text(
+        "def greet(name):\n"
+        "    return f\"Hello, {name}!\"\n\n\n"
+        "def add(a, b):\n"
+        "    return a + b + 1\n",
+        encoding="utf-8",
+    )
+
+    result = execute(
+        {
+            "path": str(path),
+            "blocks": [
+                {
+                    "first_block_lines": ["def add(a, b):"],
+                    "last_block_lines": ["    return a + b + 1"],
+                    "replace_with": "",
+                }
+            ],
+        }
+    )
+
+    content = path.read_text(encoding="utf-8")
+    assert result == "OK: patched 1 block(s)"
+    assert "def add(a, b):" not in content

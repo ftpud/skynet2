@@ -75,7 +75,7 @@ class Agent:
             self.log_path = log_path
         else:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.log_path = os.path.join(self.logs_dir, f"{agent_name}_{ts}.l")
+            self.log_path = os.path.join(self.logs_dir, f"{agent_name}_{ts}.jsonl")
 
         if self.verbose_log_path is None and self.verbose_log:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
