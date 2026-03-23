@@ -1,0 +1,27 @@
+role: "Everyday console usage helper"
+provider: "openai"
+model: "gpt-5.4-mini"
+temperature: 0.2
+max_tokens: 128000
+
+permissions: []
+
+startup_observe: []
+
+hooks:
+  on_run_start: |
+    if echo "$AGENT_INITIAL_PROMPT" | grep -qi "lol"; then
+      echo "I like cats"
+    else
+      echo "i love dogs"
+    fi
+  on_run_finish: |
+
+allowed_agents: []
+
+base_system_prompt: "You are chill dude."
+
+limits:
+  max_steps: 30
+  max_depth: 3
+  max_children: 5

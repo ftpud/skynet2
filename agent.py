@@ -89,7 +89,7 @@ class Agent:
         self.run_hooks = config.get("hooks", {}) or {}
         self.startup_observe_commands = config.get("startup_observe", []) or []
 
-        self._run_hook("on_run_start")
+        self.init_hook_output = ""
 
         if self.verbose:
             self._vprint(f"[START] Agent '{agent_name}' | depth={depth} | provider={self.provider} | model={model}")
@@ -169,10 +169,10 @@ class Agent:
     def _extract_json(self, text: str) -> dict | None:
         return extract_json(text)
 
-    def _run_hook(self, hook_name: str, extra_env: dict[str, str] | None = None):
+    def _run_hook(self, hook_name: str, extra_env: dict[str, str] | None = None) -> str:
         script = self.run_hooks.get(hook_name)
         if not script:
-            return
+            return ""
 
         env = os.environ.copy()
         env.update({
@@ -194,16 +194,17 @@ class Agent:
                 capture_output=not self.verbose,
                 text=True,
             )
-            output = (result.stdout or "") + (result.stderr or "")
-            output = output.strip()
+            output = ((result.stdout or "") + (result.stderr or "")).strip()
             status = f"hook '{hook_name}' exit={result.returncode}"
             if output:
                 status += f"\n{output[:400]}"
             self._log(0, f"hook:{hook_name}", {"script": script}, status)
             if self.verbose_log and self.verbose_log_path and output:
                 self._vprint(output[:400])
+            return output
         except Exception as e:
             self._log(0, f"hook:{hook_name}", {"script": script}, f"ERROR: {e}")
+            return ""
 
     def _run_agent(self, params: dict, step: int) -> str:
         if self.depth + 1 > self.max_depth:
@@ -446,6 +447,7 @@ class Agent:
 
     def run(self, initial_prompt: str):
         self.history = []
+        self.init_hook_output = self._run_hook("on_run_start", {"AGENT_INITIAL_PROMPT": initial_prompt})
         startup_context = self._run_startup_observations()
 
         if startup_context:
@@ -465,12 +467,17 @@ class Agent:
 
             #messages = [{"role": "system", "content": self.system_prompt}] + self.history[-self.max_context_messages :]
 
+            system_content = (
+                self.system_prompt
+                + "\n\nENVIRONMENT:\n"
+                + self.environment_context
+            )
+            if self.init_hook_output:
+                system_content += "\n\nINIT HOOK OUTPUT:\n" + self.init_hook_output
+
             messages = [{
                 "role": "system",
-                "content":
-                    self.system_prompt
-                    + "\n\nENVIRONMENT:\n"
-                    + self.environment_context
+                "content": system_content
             }] + self.history[-self.max_context_messages:]
 
             parsed = None
