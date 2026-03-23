@@ -75,44 +75,37 @@ SAFETY:
 """
 
 
-def extract_json(text: str) -> dict | None:
-    text = re.sub(r'(?:json)?', '', text, flags=re.IGNORECASE)
+def extract_all_json_actions(text: str) -> list[dict]:
     text = text.strip()
-
     decoder = json.JSONDecoder()
-    starts = [i for i, ch in enumerate(text) if ch == '{']
-    candidates: list[dict] = []
-    for start in starts:
-        try:
-            obj, _end = decoder.raw_decode(text[start:])
-            if isinstance(obj, dict) and obj.get("action") in ("command", "final_answer"):
-                return obj
-            if isinstance(obj, dict) and "action" in obj:
-                candidates.append(obj)
-        except json.JSONDecodeError:
-            pass
+    actions: list[dict] = []
 
-    if candidates:
-        return candidates[0]
-
-    repaired = re.sub(r',\s*([}\]])', r'\1', text)
-    if repaired != text:
-        starts = [i for i, ch in enumerate(repaired) if ch == '{']
+    def _collect_from(src: str):
+        starts = [i for i, ch in enumerate(src) if ch == '{']
         for start in starts:
             try:
-                obj, _end = decoder.raw_decode(repaired[start:])
+                obj, _end = decoder.raw_decode(src[start:])
                 if isinstance(obj, dict) and obj.get("action") in ("command", "final_answer"):
-                    return obj
-                if isinstance(obj, dict) and "action" in obj:
-                    candidates.append(obj)
+                    actions.append(obj)
             except json.JSONDecodeError:
                 pass
 
-    if candidates:
-        return candidates[0]
+    _collect_from(text)
+    repaired = re.sub(r',\s*([}\]])', r'\1', text)
+    if repaired != text:
+        _collect_from(repaired)
 
-    best: dict | None = None
-    best_len = 0
+    if actions:
+        seen = set()
+        unique = []
+        for a in actions:
+            key = json.dumps(a, sort_keys=True, ensure_ascii=False)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(a)
+        return unique
+
     depth = 0
     in_string = False
     escape = False
@@ -138,23 +131,33 @@ def extract_json(text: str) -> dict | None:
             depth -= 1
             if depth == 0 and block_start is not None:
                 block = text[block_start:i + 1]
-                if len(block) > best_len:
+                try:
+                    obj = json.loads(block)
+                    if isinstance(obj, dict) and obj.get("action") in ("command", "final_answer"):
+                        actions.append(obj)
+                except json.JSONDecodeError:
                     try:
-                        obj = json.loads(block)
+                        obj = json.loads(re.sub(r',\s*([}\]])', r'\1', block))
                         if isinstance(obj, dict) and obj.get("action") in ("command", "final_answer"):
-                            best = obj
-                            best_len = len(block)
+                            actions.append(obj)
                     except json.JSONDecodeError:
-                        try:
-                            obj = json.loads(re.sub(r',\s*([}\]])', r'\1', block))
-                            if isinstance(obj, dict) and obj.get("action") in ("command", "final_answer"):
-                                best = obj
-                                best_len = len(block)
-                        except json.JSONDecodeError:
-                            pass
+                        pass
                 block_start = None
 
-    return best
+    seen = set()
+    unique = []
+    for a in actions:
+        key = json.dumps(a, sort_keys=True, ensure_ascii=False)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(a)
+    return unique
+
+
+def extract_json(text: str) -> dict | None:
+    actions = extract_all_json_actions(text)
+    return actions[0] if actions else None
 
 
 def is_codex(model: str) -> bool:

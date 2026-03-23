@@ -33,7 +33,7 @@ from agent_utils import build_system_prompt, extract_json, extract_usage, is_cod
 
 
 class Agent:
-    def __init__(self, config: dict, model: str, depth: int, agent_name: str, verbose: bool = False, log_path: str | None = None, provider: str = "openai", verbose_log: bool = False, verbose_log_path: str | None = None, provider_override: str | None = None):
+    def __init__(self, config: dict, model: str, depth: int, agent_name: str, verbose: bool = False, log_path: str | None = None, provider: str = "openai", verbose_log: bool = False, verbose_log_path: str | None = None, provider_override: str | None = None, process_all_json_blocks: bool = False):
         self.config = config
         self.model = model
         self.depth = depth
@@ -42,6 +42,7 @@ class Agent:
         self.spawned_children = 0
         self.provider = (provider or "openai").lower()
         self.provider_override = (provider_override.lower() if provider_override else None)
+        self.process_all_json_blocks = process_all_json_blocks
         self.verbose_log = verbose_log
         self.verbose_log_path = verbose_log_path
         self._streaming_line_open = False
@@ -483,6 +484,7 @@ class Agent:
             }] + self.history[-self.max_context_messages:]
 
             parsed = None
+            parsed_actions = None
             step_tokens_in = 0
             step_tokens_out = 0
             for attempt in range(1, MAX_RETRIES_PER_STEP + 1):
@@ -502,7 +504,12 @@ class Agent:
                     time.sleep(0.7)
                     continue
 
-                parsed = self._extract_json(full_response)
+                if self.process_all_json_blocks:
+                    from agent_utils import extract_all_json_actions
+                    parsed_actions = extract_all_json_actions(full_response)
+                    parsed = parsed_actions[0] if parsed_actions else None
+                else:
+                    parsed = self._extract_json(full_response)
                 if parsed:
                     break
 
@@ -521,86 +528,90 @@ class Agent:
                 self._log_session_end()
                 return
 
-            action = parsed.get("action")
-            if not action:
-                self.history.append({"role": "user", "content": "Missing 'action' field in JSON"})
-                continue
+            actions_to_process = parsed_actions if (self.process_all_json_blocks and parsed_actions) else [parsed]
 
-            curr = {"action": action}
-            if action == "command":
-                curr["name"] = parsed.get("name")
-                curr["params"] = parsed.get("parameters", {})
-            self.recent_actions.append(curr)
-            if len(self.recent_actions) > 3:
-                self.recent_actions.pop(0)
-            if len(self.recent_actions) == 3 and len({__import__("json").dumps(d, sort_keys=True) for d in self.recent_actions}) == 1:
-                if self.verbose:
-                    print(f"{self._indent()} → Loop detected — forcing final answer", file=sys.stderr)
-                print("Agent appears stuck in loop. Terminating.")
-                self._log_session_end()
-                return
-
-            if action == "final_answer":
-                content = parsed.get("content", "(no content)")
-                is_invalid = False
-
-                if isinstance(content, str):
-                    stripped = content.strip()
-                    if stripped.startswith("{") and stripped.endswith("}"):
-                        try:
-                            inner = __import__("json").loads(stripped)
-                            if isinstance(inner, dict) and "action" in inner:
-                                is_invalid = True
-                        except Exception:
-                            pass
-
-                if is_invalid:
-                    if self.verbose:
-                        print(f"{self._indent()} → Invalid final_answer (wrapped JSON), retrying...", file=sys.stderr)
-
-                    error_feedback = (
-                        "INVALID OUTPUT:\n"
-                        "You returned JSON inside 'content'. This is not allowed.\n\n"
-                        "You MUST return either:\n"
-                        '1. {"action":"command","name":"...","parameters":{}}\n'
-                        '2. {"action":"final_answer","content":"plain text"}\n\n'
-                        "Do NOT wrap JSON in strings."
-                    )
-
-                    self.history.append({"role": "user", "content": error_feedback})
+            should_return = False
+            for parsed_item in actions_to_process:
+                action = parsed_item.get("action")
+                if not action:
+                    self.history.append({"role": "user", "content": "Missing 'action' field in JSON"})
                     continue
 
-                if self.verbose:
-                    print(f"\n{self._indent()} → Final answer:", file=sys.stderr)
-
-                print(content)
-                self._log(step, "final_answer", {}, content, step_tokens_in, step_tokens_out)
-                self._log_session_end()
-                return
-
-            elif action == "command":
-                name = parsed.get("name")
-                params = parsed.get("parameters", {})
-                if name not in self.config.get("permissions", []):
-                    obs = "ERROR: this command is not permitted"
-                else:
+                curr = {"action": action}
+                if action == "command":
+                    curr["name"] = parsed_item.get("name")
+                    curr["params"] = parsed_item.get("parameters", {})
+                self.recent_actions.append(curr)
+                if len(self.recent_actions) > 3:
+                    self.recent_actions.pop(0)
+                if len(self.recent_actions) == 3 and len({__import__("json").dumps(d, sort_keys=True) for d in self.recent_actions}) == 1:
                     if self.verbose:
-                        print(f"{self._indent()} → {name} {params}", file=sys.stderr)
-                    obs = self.execute_command(name, params, step)
+                        print(f"{self._indent()} → Loop detected — forcing final answer", file=sys.stderr)
+                    print("Agent appears stuck in loop. Terminating.")
+                    self._log_session_end()
+                    return
 
-                obs = obs[: self.max_output_chars] + "…" if len(obs) > self.max_output_chars else obs
+                if action == "final_answer":
+                    content = parsed_item.get("content", "(no content)")
+                    is_invalid = False
 
-                self.history.append({"role": "assistant", "content": __import__("json").dumps(parsed)})
-                self.history.append({"role": "user", "content": f"Observation: {obs}"})
+                    if isinstance(content, str):
+                        stripped = content.strip()
+                        if stripped.startswith("{") and stripped.endswith("}"):
+                            try:
+                                inner = __import__("json").loads(stripped)
+                                if isinstance(inner, dict) and "action" in inner:
+                                    is_invalid = True
+                            except Exception:
+                                pass
 
-                if name != "run_agent":
-                    self._log(step, name, params, obs, step_tokens_in, step_tokens_out)
+                    if is_invalid:
+                        if self.verbose:
+                            print(f"{self._indent()} → Invalid final_answer (wrapped JSON), retrying...", file=sys.stderr)
 
-                if self.verbose:
-                    print(f"{self._indent()}   ↳ {obs[:120]}{'…' if len(obs) > 120 else ''}", file=sys.stderr)
+                        error_feedback = (
+                            "INVALID OUTPUT:\n"
+                            "You returned JSON inside 'content'. This is not allowed.\n\n"
+                            "You MUST return either:\n"
+                            '1. {"action":"command","name":"...","parameters":{}}\n'
+                            '2. {"action":"final_answer","content":"plain text"}\n\n'
+                            "Do NOT wrap JSON in strings."
+                        )
 
-            else:
-                self.history.append({"role": "user", "content": "Invalid action — must be 'command' or 'final_answer'"})
+                        self.history.append({"role": "user", "content": error_feedback})
+                        break
+
+                    if self.verbose:
+                        print(f"\n{self._indent()} → Final answer:", file=sys.stderr)
+
+                    print(content)
+                    self._log(step, "final_answer", {}, content, step_tokens_in, step_tokens_out)
+                    self._log_session_end()
+                    return
+
+                elif action == "command":
+                    name = parsed_item.get("name")
+                    params = parsed_item.get("parameters", {})
+                    if name not in self.config.get("permissions", []):
+                        obs = "ERROR: this command is not permitted"
+                    else:
+                        if self.verbose:
+                            print(f"{self._indent()} → {name} {params}", file=sys.stderr)
+                        obs = self.execute_command(name, params, step)
+
+                    obs = obs[: self.max_output_chars] + "…" if len(obs) > self.max_output_chars else obs
+
+                    self.history.append({"role": "assistant", "content": __import__("json").dumps(parsed_item)})
+                    self.history.append({"role": "user", "content": f"Observation: {obs}"})
+
+                    if name != "run_agent":
+                        self._log(step, name, params, obs, step_tokens_in, step_tokens_out)
+
+                    if self.verbose:
+                        print(f"{self._indent()}   ↳ {obs[:120]}{'…' if len(obs) > 120 else ''}", file=sys.stderr)
+
+                else:
+                    self.history.append({"role": "user", "content": "Invalid action — must be 'command' or 'final_answer'"})
 
         if self.verbose:
             print(f"{self._indent()}Reached max steps ({self.max_steps}) without final answer.", file=sys.stderr)
@@ -630,5 +641,6 @@ if __name__ == "__main__":
         verbose_log=args.verbose_log,
         verbose_log_path=args.verbose_log_path,
         provider_override=args.provider_override,
+        process_all_json_blocks=args.process_all_json_blocks,
     )
     agent.run(args.prompt)

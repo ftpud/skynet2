@@ -16,17 +16,13 @@ def test_text_block_replace_on_fortest_add_function(tmp_path: Path):
     result = execute(
         {
             "path": str(path),
-            "blocks": [
-                {
-                    "first_block_lines": ["def add(a, b):"],
-                    "last_block_lines": ["    return a + b + 1"],
-                    "replace_with": "def add(a, b):\n    return a + b",
-                }
-            ],
+            "first_block_lines": ["def add(a, b):"],
+            "last_block_lines": ["    return a + b + 1"],
+            "replace_with": "def add(a, b):\n    return a + b",
         }
     )
 
-    assert result == "OK: patched 1 block(s)"
+    assert result == "OK: patched 1 block"
     assert "return a + b\n" in path.read_text(encoding="utf-8")
 
 
@@ -43,25 +39,16 @@ def test_text_block_replace_multiple_blocks_on_fortest(tmp_path: Path):
     result = execute(
         {
             "path": str(path),
-            "blocks": [
-                {
-                    "first_block_lines": ["def greet(name):"],
-                    "last_block_lines": ["    return f\"Hello, {name}!\""],
-                    "replace_with": "def greet(name):\n    return f\"Hi, {name}!\"",
-                },
-                {
-                    "first_block_lines": ["def add(a, b):"],
-                    "last_block_lines": ["    return a + b + 1"],
-                    "replace_with": "def add(a, b):\n    return a + b",
-                },
-            ],
+            "first_block_lines": ["def greet(name):"],
+            "last_block_lines": ["    return f\"Hello, {name}!\""],
+            "replace_with": "def greet(name):\n    return f\"Hi, {name}!\"",
         }
     )
 
     content = path.read_text(encoding="utf-8")
-    assert result == "OK: patched 2 block(s)"
+    assert result == "OK: patched 1 block"
     assert "return f\"Hi, {name}!\"\n" in content
-    assert "return a + b\n" in content
+    assert "return a + b + 1\n" in content
 
 
 def test_text_block_replace_missing_anchor_returns_error(tmp_path: Path):
@@ -77,13 +64,9 @@ def test_text_block_replace_missing_anchor_returns_error(tmp_path: Path):
     result = execute(
         {
             "path": str(path),
-            "blocks": [
-                {
-                    "first_block_lines": ["def subtract(a, b):"],
-                    "last_block_lines": ["    return a - b"],
-                    "replace_with": "def subtract(a, b):\n    return a - b",
-                }
-            ],
+            "first_block_lines": ["def subtract(a, b):"],
+            "last_block_lines": ["    return a - b"],
+            "replace_with": "def subtract(a, b):\n    return a - b",
         }
     )
 
@@ -103,16 +86,12 @@ def test_text_block_replace_empty_replace_removes_block(tmp_path: Path):
     result = execute(
         {
             "path": str(path),
-            "blocks": [
-                {
-                    "first_block_lines": ["def add(a, b):"],
-                    "last_block_lines": ["    return a + b + 1"],
-                    "replace_with": "",
-                }
-            ],
+            "first_block_lines": ["def add(a, b):"],
+            "last_block_lines": ["    return a + b + 1"],
+            "replace_with": "",
         }
     )
 
     content = path.read_text(encoding="utf-8")
-    assert result == "OK: patched 1 block(s)"
+    assert result == "OK: patched 1 block"
     assert "def add(a, b):" not in content

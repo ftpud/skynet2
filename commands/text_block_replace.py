@@ -2,12 +2,12 @@ import os
 import re
 import ast
 from difflib import SequenceMatcher
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 
 COMMAND_NAME = "text_block_replace"
-DESCRIPTION = "Replace one or more anchor-based blocks in a UTF-8 text file with safety validation. Use 3-4 lines or function names for markers. Must not be empty."
-USAGE_EXAMPLE = '{"action":"command","name":"text_block_replace","parameters":{"path":"notes.txt","blocks":[{"first_block_lines":["start marker"],"last_block_lines":["end marker"],"replace_with":"new text"}]}}'
+DESCRIPTION = "Replace one anchor-based block in a UTF-8 text file with safety validation. Use 3-4 lines or function names for markers. Must not be empty."
+USAGE_EXAMPLE = '{"action":"command","name":"text_block_replace","parameters":{"path":"notes.txt","first_block_lines":["start marker"],"last_block_lines":["end marker"],"replace_with":"new text"}}'
 
 
 SIMILARITY_THRESHOLD = 0.72
@@ -202,7 +202,7 @@ def find_block(lines, first_lines, last_lines):
 # =========================
 
 
-def patch_file(path: str, blocks: list):
+def patch_file(path: str, block: dict):
 
     if not os.path.exists(path):
         return "ERROR: file not found"
@@ -217,73 +217,51 @@ def patch_file(path: str, blocks: list):
 
     original_eol = '\r\n' if '\r\n' in content else '\n'
 
-    replacements = []
+    first_lines = block.get("first_block_lines")
+    last_lines = block.get("last_block_lines")
+    replace_with = block.get("replace_with")
 
-    for block_index, block in enumerate(blocks):
+    if not first_lines or not last_lines:
+        return "ERROR: block[0] missing anchors"
 
-        first_lines = block.get("first_block_lines")
-        last_lines = block.get("last_block_lines")
-        replace_with = block.get("replace_with")
+    if isinstance(first_lines, str):
+        first_lines = [first_lines]
 
-        if not first_lines or not last_lines:
-            return f"ERROR: block[{block_index}] missing anchors"
+    if isinstance(last_lines, str):
+        last_lines = [last_lines]
 
-        if isinstance(first_lines, str):
-            first_lines = [first_lines]
+    match = find_block(lines, first_lines, last_lines)
 
-        if isinstance(last_lines, str):
-            last_lines = [last_lines]
+    if match:
+        start, end = match
+    else:
+        symbol_name = extract_symbol_name(first_lines[0])
 
-        match = find_block(lines, first_lines, last_lines)
+        if symbol_name:
+            ast_match = locate_python_symbol(lines, symbol_name)
 
-        if match:
-
-            start, end = match
-
-        else:
-
-            symbol_name = extract_symbol_name(first_lines[0])
-
-            if symbol_name:
-
-                ast_match = locate_python_symbol(lines, symbol_name)
-
-                if ast_match:
-                    start, end = ast_match
-                else:
-                    return f"ERROR: block[{block_index}] not found"
-
+            if ast_match:
+                start, end = ast_match
             else:
-                return f"ERROR: block[{block_index}] not found"
-
-        if replace_with:
-
-            replacement_lines = [
-                l.rstrip("\r\n") + original_eol
-                for l in replace_with.splitlines()
-            ]
-
+                return "ERROR: block[0] not found"
         else:
-            replacement_lines = []
+            return "ERROR: block[0] not found"
 
-        replacements.append((start, end, replacement_lines))
-
-    replacements.sort()
-
-    for i in range(len(replacements) - 1):
-
-        if replacements[i][1] > replacements[i + 1][0]:
-            return "ERROR: overlapping patch blocks"
+    if replace_with:
+        replacement_lines = [
+            l.rstrip("\r\n") + original_eol
+            for l in replace_with.splitlines()
+        ]
+    else:
+        replacement_lines = []
 
     updated = list(lines)
-
-    for start, end, repl in reversed(replacements):
-        updated[start:end] = repl
+    updated[start:end] = replacement_lines
 
     with open(path, "w", encoding="utf-8") as f:
         f.write("".join(updated))
 
-    return f"OK: patched {len(replacements)} block(s)"
+    return "OK: patched 1 block"
 
 
 # =========================
@@ -297,12 +275,29 @@ def execute(parameters: dict):
         return "ERROR: parameters must be object"
 
     path = parameters.get("path")
-    blocks = parameters.get("blocks")
+    first_block_lines = parameters.get("first_block_lines")
+    last_block_lines = parameters.get("last_block_lines")
+    replace_with = parameters.get("replace_with")
 
     if not isinstance(path, str):
         return "ERROR: path missing"
 
-    if not isinstance(blocks, list):
-        return "ERROR: blocks missing"
+    if first_block_lines is None or last_block_lines is None:
+        return "ERROR: first_block_lines/last_block_lines missing"
 
-    return patch_file(path, blocks)
+    if isinstance(first_block_lines, str):
+        first_block_lines = [first_block_lines]
+
+    if isinstance(last_block_lines, str):
+        last_block_lines = [last_block_lines]
+
+    if not isinstance(first_block_lines, list) or not isinstance(last_block_lines, list):
+        return "ERROR: first_block_lines/last_block_lines must be string or array"
+
+    block = {
+        "first_block_lines": first_block_lines,
+        "last_block_lines": last_block_lines,
+        "replace_with": replace_with,
+    }
+
+    return patch_file(path, block)
