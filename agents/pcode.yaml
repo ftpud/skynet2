@@ -22,7 +22,25 @@ startup_observe:
   - cat project.md
 
 hooks:
-  on_run_start: ""
+  on_run_start: |
+    # Extract paths starting with ./ and stop at first space, comma, or punctuation
+    refs=$(printf "%s" "$AGENT_INITIAL_PROMPT" \
+      | grep -oE '\./[a-zA-Z0-9._/-]+' \
+      | sort -u)
+
+    if [ -n "$refs" ]; then
+      while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        if [ -f "$f" ]; then
+          echo "cat $f"
+          cat "$f"
+        else
+          echo "$f not exists"
+        fi
+      done <<< "$refs"
+    fi
+
+
   on_run_finish: ""
 
 base_system_prompt: |

@@ -197,10 +197,10 @@ class Agent:
             output = ((result.stdout or "") + (result.stderr or "")).strip()
             status = f"hook '{hook_name}' exit={result.returncode}"
             if output:
-                status += f"\n{output[:400]}"
+                status += f"\n{output}"
             self._log(0, f"hook:{hook_name}", {"script": script}, status)
             if self.verbose_log and self.verbose_log_path and output:
-                self._vprint(output[:400])
+                self._vprint(output)
             return output
         except Exception as e:
             self._log(0, f"hook:{hook_name}", {"script": script}, f"ERROR: {e}")
@@ -450,10 +450,12 @@ class Agent:
         self.init_hook_output = self._run_hook("on_run_start", {"AGENT_INITIAL_PROMPT": initial_prompt})
         startup_context = self._run_startup_observations()
 
+        env_parts = []
         if startup_context:
-            self.environment_context = startup_context
-        else:
-            self.environment_context = ""
+            env_parts.append(startup_context)
+        if self.init_hook_output:
+            env_parts.append(self.init_hook_output)
+        self.environment_context = "\n\n".join(env_parts)
 
 
 
