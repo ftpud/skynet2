@@ -11,7 +11,7 @@ def append_jsonl(log_path: str, entry: dict):
         pass
 
 
-def log_step(log_path: str, agent_name: str, provider: str, model: str, depth: int, step: int, action: str, parameters: dict, result: str):
+def log_step(log_path: str, agent_name: str, provider: str, model: str, depth: int, step: int, action: str, parameters: dict, result: str, step_tokens_in: int = 0, step_tokens_out: int = 0):
     entry = {
         "type": "step",
         "step": step,
@@ -23,6 +23,11 @@ def log_step(log_path: str, agent_name: str, provider: str, model: str, depth: i
         "provider": provider,
         "model": model,
         "depth": depth,
+        "tokens": {
+            "inbound": int(step_tokens_in or 0),
+            "outbound": int(step_tokens_out or 0),
+            "total": int(step_tokens_in or 0) + int(step_tokens_out or 0),
+        },
     }
     append_jsonl(log_path, entry)
 

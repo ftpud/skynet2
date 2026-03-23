@@ -333,7 +333,46 @@ def build_tree_panel(sessions):
                 else:
                     step_node.add("[yellow]child starting...[/yellow]")
             else:
-                tree_node.add(f"step {step_no}: {action}")
+                usage = st.get("usage") or {}
+                inp = usage.get("input_tokens")
+                if inp is None:
+                    inp = usage.get("prompt_tokens")
+                if inp is None:
+                    inp = usage.get("in")
+                if inp is None:
+                    inp = st.get("input_tokens")
+                if inp is None:
+                    inp = st.get("in_tokens")
+
+                out = usage.get("output_tokens")
+                if out is None:
+                    out = usage.get("completion_tokens")
+                if out is None:
+                    out = usage.get("out")
+                if out is None:
+                    out = st.get("output_tokens")
+                if out is None:
+                    out = st.get("out_tokens")
+
+                tokens = st.get("tokens") or {}
+                if inp is None:
+                    inp = tokens.get("input")
+                if inp is None:
+                    inp = tokens.get("inbound")
+                if out is None:
+                    out = tokens.get("output")
+                if out is None:
+                    out = tokens.get("outbound")
+
+                try:
+                    inp = int(inp or 0)
+                except Exception:
+                    inp = 0
+                try:
+                    out = int(out or 0)
+                except Exception:
+                    out = 0
+                tree_node.add(f"step {step_no}: {action} [dim]({format_human_number(inp)}, {format_human_number(out)})[/dim]")
 
     if not ordered_roots:
         root.add("(no root sessions)")

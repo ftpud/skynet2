@@ -156,8 +156,8 @@ class Agent:
                     pass
             self._streaming_line_open = False
 
-    def _log(self, step: int, action: str, parameters: dict, result: str):
-        log_step(self.log_path, self.agent_name, self.provider, self.model, self.depth, step, action, parameters, result)
+    def _log(self, step: int, action: str, parameters: dict, result: str, step_tokens_in: int = 0, step_tokens_out: int = 0):
+        log_step(self.log_path, self.agent_name, self.provider, self.model, self.depth, step, action, parameters, result, step_tokens_in, step_tokens_out)
 
     def _log_session_end(self):
         self._run_hook("on_run_finish", {
@@ -481,6 +481,8 @@ class Agent:
             }] + self.history[-self.max_context_messages:]
 
             parsed = None
+            step_tokens_in = 0
+            step_tokens_out = 0
             for attempt in range(1, MAX_RETRIES_PER_STEP + 1):
                 if self.verbose and attempt > 1:
                     print(f"{self._indent()}   retry {attempt}/{MAX_RETRIES_PER_STEP}", file=sys.stderr)
@@ -489,6 +491,8 @@ class Agent:
                     full_response, in_tokens, out_tokens = self._call_model(messages)
                     self.session_tokens_in += in_tokens
                     self.session_tokens_out += out_tokens
+                    step_tokens_in += in_tokens
+                    step_tokens_out += out_tokens
                 except Exception as e:
                     self._vend_stream()
                     if self.verbose:
@@ -510,7 +514,7 @@ class Agent:
             if not parsed:
                 if self.verbose:
                     print(f"{self._indent()} → Parsing failed after all retries", file=sys.stderr)
-                self._log(step, "parse_failure", {}, "Max retries reached")
+                self._log(step, "parse_failure", {}, "Max retries reached", step_tokens_in, step_tokens_out)
                 print("ERROR: Could not parse valid JSON after retries.")
                 self._log_session_end()
                 return
@@ -568,7 +572,7 @@ class Agent:
                     print(f"\n{self._indent()} → Final answer:", file=sys.stderr)
 
                 print(content)
-                self._log(step, "final_answer", {}, content)
+                self._log(step, "final_answer", {}, content, step_tokens_in, step_tokens_out)
                 self._log_session_end()
                 return
 
@@ -588,7 +592,7 @@ class Agent:
                 self.history.append({"role": "user", "content": f"Observation: {obs}"})
 
                 if name != "run_agent":
-                    self._log(step, name, params, obs)
+                    self._log(step, name, params, obs, step_tokens_in, step_tokens_out)
 
                 if self.verbose:
                     print(f"{self._indent()}   ↳ {obs[:120]}{'…' if len(obs) > 120 else ''}", file=sys.stderr)
@@ -598,7 +602,7 @@ class Agent:
 
         if self.verbose:
             print(f"{self._indent()}Reached max steps ({self.max_steps}) without final answer.", file=sys.stderr)
-        self._log(step, "max_steps_reached", {}, "terminated without final_answer")
+        self._log(step, "max_steps_reached", {}, "terminated without final_answer", 0, 0)
         print("Agent reached maximum step limit without producing a final answer.")
 
 

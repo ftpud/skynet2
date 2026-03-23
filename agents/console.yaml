@@ -18,7 +18,14 @@ permissions:
 
 startup_observe:
   - git --no-pager status --short
-  - git --no-pager diff
+
+hooks:
+  on_run_start: |
+    if echo "$AGENT_INITIAL_PROMPT" | grep -Ei "git|commit|push"; then
+      git status
+      git --no-pager diff
+    fi
+  on_run_finish: |
 
 allowed_agents: []
 
