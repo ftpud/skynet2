@@ -18,8 +18,9 @@ def parse_args():
     parser.add_argument("--verbose-log", action="store_true", help="duplicate verbose output to a shared log file")
     parser.add_argument("-v", "--verbose", action="store_true", help="show detailed progress")
     parser.add_argument("--startup-observe", action="append", default=[], help="command to run at startup and inject as Observation (repeatable)")
-    parser.add_argument("--process-all-json-blocks", action="store_true", help="process all valid JSON action blocks from a model response instead of only the first")
+    parser.add_argument("--process-all-json-blocks", action="store_true", help="deprecated: runtime now processes all valid JSON action blocks from a model response")
     parser.add_argument("--keep-session-open", action="store_true", help="keep session open after final answer and accept follow-up user input")
+    parser.add_argument("--parallel-tool-calls", action="store_true", help="enable provider parallel tool call support when available")
     return parser.parse_args()
 
 
@@ -52,5 +53,8 @@ def load_runtime_config(args, script_dir: str):
     if provider == "claude" and not os.getenv("ANTHROPIC_API_KEY"):
         print("Error: ANTHROPIC_API_KEY environment variable is required for provider=claude")
         sys.exit(1)
+
+    if args.parallel_tool_calls:
+        config["parallel_tool_calls"] = True
 
     return config, model, provider

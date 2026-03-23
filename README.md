@@ -1,17 +1,17 @@
 # Lightweight ReAct Agent
 
-A lightweight ReAct-style agent runtime that enforces a strict  action protocol, supports hierarchical child agents, and executes a controlled set of local commands.
+A lightweight ReAct-style agent runtime that enforces a strict JSON action protocol, supports hierarchical child agents, and executes a controlled set of local commands.
 
 ## Features
 
-- Strict **single  object** response protocol (`command` or `final_answer`)
+- Strict JSON-only response protocol with batched action support
 - Pluggable command system via `commands/*.py`
 - Multi-agent orchestration with bounded depth and child count (`run_agent`)
 - Provider support:
   - OpenAI
   - Anthropic Claude
-- Streaming model output handling with  extraction/recovery
-- Session + step logging to L
+- Streaming model output handling with JSON extraction/recovery
+- Session + step logging to JSONL
 - Optional verbose console logging and shared verbose log file
 - Startup observation hooks (`--startup-observe`)
 - Runtime hooks from agent config (`on_run_start`, `on_run_finish`, etc.)
@@ -21,8 +21,8 @@ A lightweight ReAct-style agent runtime that enforces a strict  action protocol,
 - `agent.py` — main runtime/orchestrator
 - `agent_cli.py` — CLI argument parsing + runtime config loading
 - `agent_loaders.py` — dynamic loading of commands and agent configs
-- `agent_logging.py` — L logging helpers
-- `agent_utils.py` — system prompt builder,  extraction, token usage helpers
+- `agent_logging.py` — JSONL logging helpers
+- `agent_utils.py` — system prompt builder, JSON extraction, token usage helpers
 - `agents/` — YAML agent definitions
 - `commands/` — command implementations
 - `logs/` — runtime logs
@@ -85,6 +85,9 @@ From `agent_cli.py`:
 - `--verbose-log-path`: shared verbose log file path
 - `-v, --verbose`: print detailed progress
 - `--startup-observe`: repeatable shell command injected as initial Observation
+- `--process-all-json-blocks`: deprecated; runtime now processes every valid JSON action block in a response
+- `--keep-session-open`: keep a child session open for follow-up prompts
+- `--parallel-tool-calls`: enable provider parallel tool call support when available
 
 ## Configuration Reference (`agents/*.yaml`)
 
@@ -130,26 +133,31 @@ This project relies on explicit contracts between runtime, model output, command
 
 ### 1) Model Output Contract
 
-Every model turn must resolve to exactly one  object:
+Every model turn must resolve to valid JSON in one of these forms:
 
-- Command action:
-
-```
-{"action":"command","name":"<command_name>","parameters":{}}
-```
-
-- Final answer action:
+- Single final answer object:
 
 ```
 {"action":"final_answer","content":"plain text"}
 ```
 
+- Batched action array:
+
+```
+[
+  {"action":"command","name":"<command_name>","parameters":{}},
+  {"action":"command","name":"<command_name>","parameters":{}}
+]
+```
+
 Contract rules:
 
-- Exactly one top-level  object
-- `action` must be `command` or `final_answer`
+- Output must be valid JSON only
+- Each action block must have `action` equal to `command` or `final_answer`
 - `command` requires `name` and `parameters` object
 - `final_answer` requires `content`
+- A response ends execution only when it contains exactly one action block and that block is `final_answer`
+- Multi-block responses are treated as reasoning/execution batches
 - Invalid output triggers extraction/retry/recovery logic
 
 ### 2) Command Plugin Contract
@@ -164,7 +172,7 @@ Each module in `commands/` must export:
 
 Behavioral contract:
 
-- Input is a -like dict (`parameters`)
+- Input is a JSON-like dict (`parameters`)
 - Output must be serializable/loggable
 - Errors should be raised with clear messages for observation logging
 
@@ -193,7 +201,7 @@ Parent-to-child invocation contract:
 
 ### 5) Logging Contract
 
-Runtime writes structured L logs (default under `logs/`):
+Runtime writes structured JSONL logs (default under `logs/`):
 
 - Session start/end records
 - Per-step action + parameters + result/error

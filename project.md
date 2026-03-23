@@ -6,7 +6,7 @@
 - `agent_constants.py`: Shared execution limits.
 - `agent_loaders.py`: Command and agent config discovery.
 - `agent_logging.py`: Logging helpers.
-- `agent_utils.py`: Prompt extraction and token helpers.
+- `agent_utils.py`: System prompt builder, JSON extraction, and token helpers.
 
 ## Top-Level Files
 - `ARCHITECTUDE.md`

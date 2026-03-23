@@ -95,3 +95,51 @@ def test_text_block_replace_empty_replace_removes_block(tmp_path: Path):
     content = path.read_text(encoding="utf-8")
     assert result == "OK: patched 1 block"
     assert "def add(a, b):" not in content
+
+
+def test_text_block_replace_overlapping_same_anchor_line(tmp_path: Path):
+    path = tmp_path / "overlap.py"
+    path.write_text(
+        "def sample():\n"
+        "    value = 1\n"
+        "    return value\n",
+        encoding="utf-8",
+    )
+
+    result = execute(
+        {
+            "path": str(path),
+            "first_block_lines": ["    return value"],
+            "last_block_lines": ["    return value"],
+            "replace_with": "    return value + 1",
+        }
+    )
+
+    assert result == "OK: patched 1 block"
+    assert path.read_text(encoding="utf-8") == (
+        "def sample():\n"
+        "    value = 1\n"
+        "    return value + 1\n"
+    )
+
+
+def test_text_block_replace_overlapping_multi_line_anchors(tmp_path: Path):
+    path = tmp_path / "overlap_multi.py"
+    path.write_text(
+        "alpha\n"
+        "beta\n"
+        "gamma\n",
+        encoding="utf-8",
+    )
+
+    result = execute(
+        {
+            "path": str(path),
+            "first_block_lines": ["alpha", "beta"],
+            "last_block_lines": ["beta", "gamma"],
+            "replace_with": "merged",
+        }
+    )
+
+    assert result == "OK: patched 1 block"
+    assert path.read_text(encoding="utf-8") == "merged\n"

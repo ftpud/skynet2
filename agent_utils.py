@@ -29,10 +29,13 @@ def build_system_prompt(config: dict, command_info: dict, agent_info: dict) -> s
             f"- {name}: {script}" for name, script in hooks.items() if script
         ) + "\n"
 
+    tool_use_rules = config.get("tool_use_rules", "").strip()
+    if tool_use_rules:
+        tool_use_rules = "\nTOOL USE:\n" + tool_use_rules + "\n"
+
     return f"""You are a {role} agent.
 
-{base}{hooks_text}
-
+{base}{hooks_text}{tool_use_rules}
 You MUST respond with EXACTLY ONE valid JSON object and nothing else.
 
 Possible actions:
@@ -55,8 +58,13 @@ CRITICAL RULES:
 - Use one of the allowed commands below
 - Do not repeat the same action/parameters more than twice
 - NEVER wrap action in final_answer
+- If you need more than one step, return multiple action objects in one JSON array
+- Default expectation: deliver working results, not just a plan
+- Do not stop at analysis when you can continue to implementation, verification, and a concise closeout
+- Prefer dedicated file tools over shell commands when a dedicated tool exists
+- Batch related reads together when possible instead of reading files one-by-one
+- Do not ask for confirmation unless truly blocked
 - Always perform all required steps by commands
-
 
 ALLOWED COMMANDS:
 {cmd_list}
@@ -64,14 +72,16 @@ ALLOWED AGENTS:
 {allowed_agents_list}
 
 STRATEGY:
-- Think step-by-step inside your reasoning (but do NOT output reasoning)
-- Prefer shortest reliable path
-- If command fails → try different approach, do NOT loop
-- Never ask for confirmation
-- Always perform all steps
+- Think first, then act
+- Prefer the shortest reliable path
+- Reuse existing patterns before adding new logic
+- If command fails, try a different approach instead of looping
+- Keep edits minimal, coherent, and behavior-safe
+- End with a concrete result or a precise blocker
 
 SAFETY:
-- Never run destructive commands (rm -rf, shutdown, etc.)
+- Never run destructive commands unless explicitly requested
+- Never revert user changes you did not make
 """
 
 
@@ -81,7 +91,7 @@ def extract_all_json_actions(text: str) -> list[dict]:
     actions: list[dict] = []
 
     def _collect_from(src: str):
-        starts = [i for i, ch in enumerate(src) if ch == '{']
+        starts = [i for i, ch in enumerate(src) if ch == "{"]
         for start in starts:
             try:
                 obj, _end = decoder.raw_decode(src[start:])
@@ -91,7 +101,7 @@ def extract_all_json_actions(text: str) -> list[dict]:
                 pass
 
     _collect_from(text)
-    repaired = re.sub(r',\s*([}\]])', r'\1', text)
+    repaired = re.sub(r",\s*([}\]])", r"\1", text)
     if repaired != text:
         _collect_from(repaired)
 
@@ -115,7 +125,7 @@ def extract_all_json_actions(text: str) -> list[dict]:
         if escape:
             escape = False
             continue
-        if ch == '\\' and in_string:
+        if ch == "\\" and in_string:
             escape = True
             continue
         if ch == '"':
@@ -123,11 +133,11 @@ def extract_all_json_actions(text: str) -> list[dict]:
             continue
         if in_string:
             continue
-        if ch == '{':
+        if ch == "{":
             if depth == 0:
                 block_start = i
             depth += 1
-        elif ch == '}':
+        elif ch == "}":
             depth -= 1
             if depth == 0 and block_start is not None:
                 block = text[block_start:i + 1]
@@ -137,7 +147,7 @@ def extract_all_json_actions(text: str) -> list[dict]:
                         actions.append(obj)
                 except json.JSONDecodeError:
                     try:
-                        obj = json.loads(re.sub(r',\s*([}\]])', r'\1', block))
+                        obj = json.loads(re.sub(r",\s*([}\]])", r"\1", block))
                         if isinstance(obj, dict) and obj.get("action") in ("command", "final_answer"):
                             actions.append(obj)
                     except json.JSONDecodeError:

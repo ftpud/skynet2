@@ -27,3 +27,16 @@ def test_extract_all_json_actions_returns_all_blocks_in_order():
         {"action": "command", "name": "read_file", "parameters": {"path": "b.txt"}},
         {"action": "final_answer", "content": "done"},
     ]
+
+
+def test_extract_all_json_actions_ignores_non_action_json():
+    text = """
+{"note":"ignore me"}
+{"action":"command","name":"read_file","parameters":{"path":"a.txt"}}
+"""
+
+    result = extract_all_json_actions(text)
+
+    assert result == [
+        {"action": "command", "name": "read_file", "parameters": {"path": "a.txt"}},
+    ]

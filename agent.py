@@ -29,7 +29,7 @@ from agent_constants import (
 )
 from agent_loaders import load_agents, load_commands
 from agent_logging import log_session_end, log_session_start, log_step
-from agent_utils import build_system_prompt, extract_json, extract_usage, is_codex
+from agent_utils import build_system_prompt, extract_all_json_actions, extract_json, extract_usage, is_codex
 
 
 class Agent:
@@ -47,6 +47,7 @@ class Agent:
         self.verbose_log = verbose_log
         self.verbose_log_path = verbose_log_path
         self._streaming_line_open = False
+        self.parallel_tool_calls = bool(config.get("parallel_tool_calls", False))
         if self.provider == "openai":
             self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         elif self.provider == "claude":
@@ -475,6 +476,7 @@ class Agent:
                 temperature=temperature,
                 max_output_tokens=max_tokens,
                 text={"format": {"type": "json_object"}},
+                parallel_tool_calls=self.parallel_tool_calls,
             ) as stream:
                 for event in stream:
                     if event.type == "response.output_text.delta":
@@ -672,7 +674,6 @@ class Agent:
                     continue
 
                 if self.process_all_json_blocks:
-                    from agent_utils import extract_all_json_actions
                     parsed_actions = extract_all_json_actions(full_response)
                     parsed = parsed_actions[0] if parsed_actions else None
                 else:
@@ -696,7 +697,8 @@ class Agent:
                 self._log_session_end()
                 return
 
-            actions_to_process = parsed_actions if (self.process_all_json_blocks and parsed_actions) else [parsed]
+            actions_to_process = parsed_actions or []
+            should_finish = len(actions_to_process) == 1 and actions_to_process[0].get("action") == "final_answer"
 
             for parsed_item in actions_to_process:
                 action = parsed_item.get("action")
