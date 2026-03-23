@@ -185,7 +185,7 @@ def find_block(lines, first_lines, last_lines):
     if start is None:
         return None
 
-    search_start = start + len(first_lines)
+    search_start = start + 1 #len(first_lines)
 
     end_anchor = find_anchor(lines[search_start:], last_lines)
 
