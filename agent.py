@@ -447,7 +447,6 @@ class Agent:
         return "\n\n".join(results)
 
     def run(self, initial_prompt: str):
-        self.history = []
         self.init_hook_output = self._run_hook("on_run_start", {"AGENT_INITIAL_PROMPT": initial_prompt})
         startup_context = self._run_startup_observations()
 
@@ -458,17 +457,18 @@ class Agent:
             env_parts.append(self.init_hook_output)
         self.environment_context = "\n\n".join(env_parts)
 
+        if not self.history:
+            self.history = [{"role": "user", "content": initial_prompt}]
+        else:
+            self.history.append({"role": "user", "content": initial_prompt})
 
-
-        self.history.append({"role": "user", "content": initial_prompt})
+        self.recent_actions = []
         step = 0
 
         while step < self.max_steps:
             step += 1
             if self.verbose:
                 print(f"{self._indent()}[{step:2d}] Calling {self.provider}:{self.model} …", file=sys.stderr)
-
-            #messages = [{"role": "system", "content": self.system_prompt}] + self.history[-self.max_context_messages :]
 
             system_content = (
                 self.system_prompt
@@ -530,7 +530,6 @@ class Agent:
 
             actions_to_process = parsed_actions if (self.process_all_json_blocks and parsed_actions) else [parsed]
 
-            should_return = False
             for parsed_item in actions_to_process:
                 action = parsed_item.get("action")
                 if not action:
@@ -547,6 +546,7 @@ class Agent:
                 if len(self.recent_actions) == 3 and len({__import__("json").dumps(d, sort_keys=True) for d in self.recent_actions}) == 1:
                     if self.verbose:
                         print(f"{self._indent()} → Loop detected — forcing final answer", file=sys.stderr)
+                    self._log(step, "loop_termination", {}, "Agent appears stuck in loop. Terminating.", step_tokens_in, step_tokens_out)
                     print("Agent appears stuck in loop. Terminating.")
                     self._log_session_end()
                     return
@@ -617,6 +617,7 @@ class Agent:
             print(f"{self._indent()}Reached max steps ({self.max_steps}) without final answer.", file=sys.stderr)
         self._log(step, "max_steps_reached", {}, "terminated without final_answer", 0, 0)
         print("Agent reached maximum step limit without producing a final answer.")
+        self._log_session_end()
 
 
 if __name__ == "__main__":
@@ -643,4 +644,15 @@ if __name__ == "__main__":
         provider_override=args.provider_override,
         process_all_json_blocks=args.process_all_json_blocks,
     )
-    agent.run(args.prompt)
+
+    current_prompt = args.prompt
+    while True:
+        agent.run(current_prompt)
+        if not args.keep_session_open:
+            break
+        try:
+            current_prompt = input("\nYou> ").strip()
+        except EOFError:
+            break
+        if not current_prompt:
+            break

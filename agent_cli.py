@@ -19,6 +19,7 @@ def parse_args():
     parser.add_argument("-v", "--verbose", action="store_true", help="show detailed progress")
     parser.add_argument("--startup-observe", action="append", default=[], help="command to run at startup and inject as Observation (repeatable)")
     parser.add_argument("--process-all-json-blocks", action="store_true", help="process all valid JSON action blocks from a model response instead of only the first")
+    parser.add_argument("--keep-session-open", action="store_true", help="keep session open after final answer and accept follow-up user input")
     return parser.parse_args()
 
 
