@@ -40,6 +40,7 @@ class Agent:
         self.agent_name = agent_name
         self.verbose = verbose
         self.spawned_children = 0
+        self.call_agent_sessions: dict[str, dict] = {}
         self.provider = (provider or "openai").lower()
         self.provider_override = (provider_override.lower() if provider_override else None)
         self.process_all_json_blocks = process_all_json_blocks
@@ -269,9 +270,176 @@ class Agent:
         except Exception as e:
             return f"ERROR: could not start child: {e}"
 
+
+    def _call_agent(self, params: dict, step: int) -> str:
+        if self.depth + 1 > self.max_depth:
+            return "ERROR: maximum nesting depth reached"
+        if self.spawned_children >= self.max_children:
+            return "ERROR: maximum number of child agents reached"
+
+        child_agent = params.get("agent")
+        child_prompt = params.get("prompt")
+        if not child_agent or not child_prompt:
+            return "ERROR: 'agent' and 'prompt' required"
+
+        session_id = str(params.get("session_id") or child_agent)
+        session = self.call_agent_sessions.get(session_id)
+
+        if session is None:
+            self.spawned_children += 1
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            child_log_path = os.path.join(self.logs_dir, f"{child_agent}_{ts}.jsonl")
+            cmd = [
+                sys.executable,
+                os.path.abspath(__file__),
+                "--agent",
+                child_agent,
+                "--prompt",
+                child_prompt,
+                "--depth",
+                str(self.depth + 1),
+                "--log-path",
+                child_log_path,
+                "--keep-session-open",
+            ]
+            if self.provider_override:
+                cmd += ["--provider-override", self.provider_override]
+            if self.verbose_log:
+                cmd += ["--verbose-log"]
+                if self.verbose_log_path:
+                    cmd += ["--verbose-log-path", self.verbose_log_path]
+
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=0,
+                )
+            except Exception as e:
+                return f"ERROR: could not start child: {e}"
+
+            session = {
+                "agent": child_agent,
+                "proc": proc,
+                "log_path": child_log_path,
+                "started": False,
+            }
+            self.call_agent_sessions[session_id] = session
+
+            self._log(
+                step=step,
+                action="call_agent",
+                parameters={"agent": child_agent, "prompt": child_prompt, "session_id": session_id},
+                result=f"child persistent session started | log file → {child_log_path}",
+            )
+        else:
+            proc = session["proc"]
+            if proc.poll() is not None:
+                self.call_agent_sessions.pop(session_id, None)
+                return "ERROR: child session is closed"
+            if session.get("agent") != child_agent:
+                return "ERROR: session_id is already bound to another agent"
+
+            try:
+                assert proc.stdin is not None
+                proc.stdin.write(child_prompt + "\n")
+                proc.stdin.flush()
+            except Exception as e:
+                self.call_agent_sessions.pop(session_id, None)
+                return f"ERROR: failed to send prompt to child: {e}"
+        proc = session["proc"]
+        try:
+            assert proc.stdout is not None
+            assert proc.stderr is not None
+            import selectors
+
+            selector = selectors.DefaultSelector()
+            selector.register(proc.stdout, selectors.EVENT_READ)
+            selector.register(proc.stderr, selectors.EVENT_READ)
+
+            stdout_buffer = ""
+            stderr_chunks = []
+            prompt_marker = "\nYou> "
+            saw_prompt = False
+            idle_deadline = time.time() + CHILD_AGENT_TIMEOUT
+
+            while True:
+                if proc.poll() is not None:
+                    try:
+                        remaining_out = proc.stdout.read() or ""
+                        if remaining_out:
+                            stdout_buffer += remaining_out
+                    except Exception:
+                        pass
+                    try:
+                        remaining_err = proc.stderr.read() or ""
+                        if remaining_err:
+                            stderr_chunks.append(remaining_err)
+                    except Exception:
+                        pass
+                    self.call_agent_sessions.pop(session_id, None)
+                    err = "".join(stderr_chunks).strip()[:400]
+                    return f"ERROR: child agent ended unexpectedly\n{err}"
+
+                events = selector.select(timeout=0.2)
+                if not events:
+                    if time.time() >= idle_deadline:
+                        return "ERROR: child agent timed out waiting for response"
+                    continue
+
+                idle_deadline = time.time() + CHILD_AGENT_TIMEOUT
+
+                for key, _ in events:
+                    stream = key.fileobj
+                    try:
+                        data = os.read(stream.fileno(), 4096).decode("utf-8", errors="replace")
+                    except Exception:
+                        data = ""
+
+                    if not data:
+                        continue
+
+                    if stream is proc.stderr:
+                        stderr_chunks.append(data)
+                        continue
+
+                    stdout_buffer += data
+                    if prompt_marker in stdout_buffer or stdout_buffer.endswith("You> "):
+                        saw_prompt = True
+                        break
+
+                if saw_prompt:
+                    break
+
+            selector.close()
+
+            if prompt_marker in stdout_buffer:
+                answer = stdout_buffer.rsplit(prompt_marker, 1)[0].strip()
+            elif stdout_buffer.endswith("You> "):
+                answer = stdout_buffer[:-5].strip()
+            else:
+                return "ERROR: child agent prompt not detected"
+
+            if not session.get("started"):
+                session["started"] = True
+            elif answer.startswith("You>"):
+                answer = answer[4:].strip()
+
+            if not answer:
+                return "ERROR: child returned empty answer"
+            return f"FINAL_ANSWER: {answer}"
+        except Exception as e:
+            self.call_agent_sessions.pop(session_id, None)
+            return f"ERROR: failed reading child output: {e}"
+
     def execute_command(self, name: str, params: dict, step: int) -> str:
         if name == "run_agent":
             return self._run_agent(params, step)
+        if name == "call_agent":
+            return self._call_agent(params, step)
 
         handler = self.command_handlers.get(name)
         if not handler:
@@ -340,15 +508,14 @@ class Agent:
             for chunk in stream:
                 if hasattr(chunk, "usage") and chunk.usage is not None:
                     usage = chunk.usage
+                    in_tokens, out_tokens = self._extract_usage(usage, "chat_completions")
                 delta = chunk.choices[0].delta.content if chunk.choices else None
                 delta = delta or ""
                 if delta:
                     self._vstream(delta)
                 full_response += delta
-                parsed_early = self._extract_json(full_response)
-                if parsed_early is not None:
-                    continue
-                in_tokens, out_tokens = self._extract_usage(usage, "chat_completions")
+                if parsed_early is None:
+                    parsed_early = self._extract_json(full_response)
             self._vend_stream()
             if parsed_early is not None:
                 return __import__("json").dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
@@ -510,6 +677,7 @@ class Agent:
                     parsed = parsed_actions[0] if parsed_actions else None
                 else:
                     parsed = self._extract_json(full_response)
+                    parsed_actions = [parsed] if parsed else None
                 if parsed:
                     break
 

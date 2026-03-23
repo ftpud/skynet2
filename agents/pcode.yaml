@@ -1,6 +1,6 @@
 role: "Coding specialist"
 provider: "openai"
-model: "gpt-5.3-codex"
+model: "gpt-5.4"
 temperature: 0.2
 max_tokens: 128000
 
@@ -11,11 +11,12 @@ permissions:
   - multiple_linux_commands
   - linux_command
   - append_to_file
-  - run_agent
+  - call_agent
   - read_file
   - write_file
 
-allowed_agents: []
+allowed_agents:
+  - pcode
 
 startup_observe:
   - ls

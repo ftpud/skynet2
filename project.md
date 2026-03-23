@@ -45,6 +45,7 @@
 - `replace_in_file`
 - `replace_in_multiple_files`
 - `run_agent`
+- `call_agent`
 - `text_block_replace`
 - `write_file`
 
