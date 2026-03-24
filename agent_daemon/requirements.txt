@@ -1,0 +1,13 @@
+# agent_daemon requirements
+# These are the same dependencies the skynet2 agent runtime needs.
+# Install with:  pip install -r requirements.txt
+
+# OpenAI SDK (required for provider=openai)
+openai>=1.0.0
+
+# YAML config parsing (always required)
+pyyaml>=6.0
+
+# Anthropic SDK (only required when using provider=claude)
+anthropic>=0.20.0
+

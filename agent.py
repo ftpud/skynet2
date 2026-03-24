@@ -4,7 +4,9 @@ Production-ready lightweight ReAct-style AI Agent
 Follows strict JSON protocol, hierarchical spawning, bounded execution
 """
 
+import json
 import os
+import selectors
 import shlex
 import subprocess
 import sys
@@ -63,7 +65,7 @@ class Agent:
         self.session_tokens_in = 0
         self.session_tokens_out = 0
 
-        limits = config.get("limits", {})
+        limits = config.get("limits") or {}
         self.max_steps = limits.get("max_steps", MAX_STEPS)
         self.max_depth = limits.get("max_depth", MAX_AGENT_DEPTH)
         self.max_children = limits.get("max_children", MAX_CHILD_AGENTS)
@@ -361,7 +363,6 @@ class Agent:
         try:
             assert proc.stdout is not None
             assert proc.stderr is not None
-            import selectors
 
             selector = selectors.DefaultSelector()
             selector.register(proc.stdout, selectors.EVENT_READ)
@@ -467,7 +468,7 @@ class Agent:
         # Build compacted history
         self.history = [
             initial_prompt_msg,
-            {"role": "assistant", "content": __import__("json").dumps({
+            {"role": "assistant", "content": json.dumps({
                 "action": "command",
                 "name": "compact_history",
                 "parameters": {"summary": summary},
@@ -528,7 +529,6 @@ class Agent:
                 temperature=temperature,
                 max_output_tokens=max_tokens,
                 text={"format": {"type": "json_object"}},
-                parallel_tool_calls=self.parallel_tool_calls,
             ) as stream:
                 for event in stream:
                     if event.type == "response.output_text.delta":
@@ -542,7 +542,7 @@ class Agent:
                 in_tokens, out_tokens = self._extract_usage(usage, "responses")
                 self._vend_stream()
                 if parsed_early is not None:
-                    return __import__("json").dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
+                    return json.dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
                 return full_response, in_tokens, out_tokens
 
         elif self.provider == "openai":
@@ -572,7 +572,7 @@ class Agent:
                     parsed_early = self._extract_json(full_response)
             self._vend_stream()
             if parsed_early is not None:
-                return __import__("json").dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
+                return json.dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
             return full_response, in_tokens, out_tokens
 
         system_text = ""
@@ -635,7 +635,7 @@ class Agent:
             self._vend_stream()
 
             if parsed_early is not None:
-                return __import__("json").dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
+                return json.dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
 
             if stop_reason == "max_tokens" and claude_max_tokens < max_claude_tokens:
                 new_limit = min(claude_max_tokens * 2, max_claude_tokens)
@@ -678,6 +678,9 @@ class Agent:
             env_parts.append(self.init_hook_output)
         self.environment_context = "\n\n".join(env_parts)
 
+        # Reset so this run's environment context is injected on the first step.
+        self._env_context_sent = False
+
         if not self.history:
             self.history = [{"role": "user", "content": initial_prompt}]
         else:
@@ -700,8 +703,6 @@ class Agent:
                     + "\n\nENVIRONMENT:\n"
                     + self.environment_context
                 )
-                if self.init_hook_output:
-                    system_content += "\n\nINIT HOOK OUTPUT:\n" + self.init_hook_output
                 self._env_context_sent = True
             else:
                 system_content = self.system_prompt
@@ -774,7 +775,7 @@ class Agent:
                 self.recent_actions.append(curr)
                 if len(self.recent_actions) > 3:
                     self.recent_actions.pop(0)
-                if len(self.recent_actions) == 3 and len({__import__("json").dumps(d, sort_keys=True) for d in self.recent_actions}) == 1:
+                if len(self.recent_actions) == 3 and len({json.dumps(d, sort_keys=True) for d in self.recent_actions}) == 1:
                     if self.verbose:
                         print(f"{self._indent()} → Loop detected — forcing final answer", file=sys.stderr)
                     self._log(step, "loop_termination", {}, "Agent appears stuck in loop. Terminating.", step_tokens_in, step_tokens_out)
@@ -790,7 +791,7 @@ class Agent:
                         stripped = content.strip()
                         if stripped.startswith("{") and stripped.endswith("}"):
                             try:
-                                inner = __import__("json").loads(stripped)
+                                inner = json.loads(stripped)
                                 if isinstance(inner, dict) and "action" in inner:
                                     is_invalid = True
                             except Exception:
@@ -840,7 +841,7 @@ class Agent:
                     else:
                         history_obs = obs
 
-                    self.history.append({"role": "assistant", "content": __import__("json").dumps(parsed_item)})
+                    self.history.append({"role": "assistant", "content": json.dumps(parsed_item)})
 
                     # Add a history-pressure hint so the model knows when to compact
                     history_chars = sum(len(m.get("content", "")) for m in self.history)

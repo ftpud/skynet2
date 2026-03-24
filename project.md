@@ -9,7 +9,7 @@
 - `agent_utils.py`: System prompt builder, JSON extraction, and token helpers.
 
 ## Top-Level Files
-- `ARCHITECTUDE.md`
+- `ARCHITECTURE.md`
 - `README.md`
 - `project.md`
 - `.gitignore`
@@ -41,7 +41,10 @@
 
 ## Commands
 - `append_to_file`
+- `apply_patch`
 - `ask_user`
+- `call_agent`
+- `compact_history`
 - `linux_command`
 - `ls`
 - `multiple_file_read`
@@ -50,12 +53,13 @@
 - `replace_in_file`
 - `replace_in_multiple_files`
 - `run_agent`
-- `call_agent`
 - `text_block_replace`
 - `write_file`
 
 ## Tests
-- `tests/test_extract_.py`
+- `tests/test_apply_patch.py`
+- `tests/test_extract_actions.py`
+- `tests/test_extract_json.py`
 - `tests/test_text_block_replace.py`
 
 ## TUI

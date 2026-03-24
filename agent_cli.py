@@ -18,7 +18,7 @@ def parse_args():
     parser.add_argument("--verbose-log", action="store_true", help="duplicate verbose output to a shared log file")
     parser.add_argument("-v", "--verbose", action="store_true", help="show detailed progress")
     parser.add_argument("--startup-observe", action="append", default=[], help="command to run at startup and inject as Observation (repeatable)")
-    parser.add_argument("--process-all-json-blocks", action="store_true", help="deprecated compatibility flag; runtime always processes all valid JSON action blocks from a model response")
+    parser.add_argument("--process-all-json-blocks", action="store_true", help="process every valid JSON action block in a model response (default: only the first non-final action per response)")
     parser.add_argument("--keep-session-open", action="store_true", help="keep session open after final answer and accept follow-up user input")
     parser.add_argument("--parallel-tool-calls", action="store_true", help="enable provider parallel tool call support when available")
     return parser.parse_args()

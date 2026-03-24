@@ -137,7 +137,7 @@ Commands are isolated modules loaded at runtime. The orchestrator only calls reg
 ## Execution Safety Model
 
 Safety controls implemented in runtime:
-- Strict -only action protocol
+- Strict JSON-only action protocol
 - Permission check before command execution
 - Max steps and retries per step
 - Max context window size
@@ -146,6 +146,11 @@ Safety controls implemented in runtime:
 - Child process timeout
 - Loop detection for repeated identical actions
 - Non-destructive guidance embedded in system prompt
+
+**Note on command blocking**: `linux_command` and `multiple_linux_commands` maintain a
+`_BLOCKED` list of dangerous patterns (e.g. `rm -rf`, `shutdown`). This is a lightweight
+deterrent against accidental misuse, not a security boundary — alternative phrasings
+(`rm -r -f`, `bash -c '...'`) are not caught. Do not rely on it for OS-level isolation.
 
 ---
 

@@ -228,16 +228,8 @@ def extract_usage(usage, api_type: str) -> tuple[int, int]:
     if api_type == "responses":
         input_tokens = _read(usage, "input_tokens", "prompt_tokens")
         output_tokens = _read(usage, "output_tokens", "completion_tokens")
-
-        input_details = getattr(usage, "input_tokens_details", None)
-        if input_details is None and isinstance(usage, dict):
-            input_details = usage.get("input_tokens_details")
-        output_details = getattr(usage, "output_tokens_details", None)
-        if output_details is None and isinstance(usage, dict):
-            output_details = usage.get("output_tokens_details")
-
-        input_tokens += _read(input_details, "cached_tokens")
-        output_tokens += _read(output_details, "reasoning_tokens")
+        # NOTE: cached_tokens and reasoning_tokens are already included in
+        # input_tokens and output_tokens respectively — do NOT add them again.
         return (input_tokens, output_tokens)
 
     return (
