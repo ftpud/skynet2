@@ -1,0 +1,28 @@
+# Swarm meeting configuration
+# Used by swarm.py — not a runnable agent config.
+# Points to the agents that will participate in the meeting,
+# controls rounds and consensus detection.
+
+role: "Swarm meeting"
+description: "Multi-agent collaborative meeting. Participants discuss a shared topic, build on each other's contributions, and reach collective conclusions."
+
+# Agents that participate — each must have an agents/<name>.yaml
+participants:
+  - swarm_analyst
+  - swarm_coder
+  - swarm_critic
+
+# Maximum number of rounds before the meeting ends regardless of consensus
+max_rounds: 4
+
+# Stop early when this many distinct agents have posted type=done
+done_threshold: 2
+
+# Seconds allowed per agent turn
+response_timeout: 300
+
+# Optional: provider/model overrides applied to all participants
+# (can also be overridden per-agent in their individual yaml files)
+# provider: openai
+# model: gpt-5.4-mini
+
