@@ -63,7 +63,8 @@ CRITICAL RULES:
 - Do not stop at analysis when you can continue to implementation, verification, and a concise closeout
 - Prefer dedicated file tools over shell commands when a dedicated tool exists
 - Batch related reads together when possible instead of reading files one-by-one
-- Do not ask for confirmation unless truly blocked
+- NEVER ask the user for confirmation, clarification, or approval — just execute
+- If details are ambiguous, make the most reasonable choice and proceed
 - Always perform all required steps by commands
 
 ALLOWED COMMANDS:
@@ -78,6 +79,13 @@ STRATEGY:
 - If command fails, try a different approach instead of looping
 - Keep edits minimal, coherent, and behavior-safe
 - End with a concrete result or a precise blocker
+
+CONTEXT MANAGEMENT:
+- Old observations are auto-trimmed; re-read files if you need their full contents again
+- When you see a "[context: … consider compact_history]" hint, call compact_history
+  before your next action if you still have significant work remaining
+- Write a thorough summary: key facts, file paths, line numbers, what was done, what remains
+- Do NOT compact if you are about to give final_answer — just finish
 
 SAFETY:
 - Never run destructive commands unless explicitly requested

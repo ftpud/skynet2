@@ -23,6 +23,7 @@ from agent_constants import (
     MAX_AGENT_DEPTH,
     MAX_CHILD_AGENTS,
     MAX_CONTEXT_MESSAGES,
+    MAX_OBS_HISTORY_CHARS,
     MAX_OUTPUT_CHARS,
     MAX_RETRIES_PER_STEP,
     MAX_STEPS,
@@ -68,6 +69,11 @@ class Agent:
         self.max_children = limits.get("max_children", MAX_CHILD_AGENTS)
         self.max_output_chars = MAX_OUTPUT_CHARS
         self.max_context_messages = MAX_CONTEXT_MESSAGES
+        self.max_obs_history_chars = limits.get("max_obs_history_chars", MAX_OBS_HISTORY_CHARS)
+
+        # Track whether the environment context has already been injected once
+        # so we don't repeat it in every subsequent system-prompt call.
+        self._env_context_sent = False
 
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
         self.work_dir = os.getcwd()
@@ -436,11 +442,57 @@ class Agent:
             self.call_agent_sessions.pop(session_id, None)
             return f"ERROR: failed reading child output: {e}"
 
+    def _compact_history(self, params: dict, step: int) -> str:
+        """Replace old history messages with a compact summary provided by the model."""
+        summary = params.get("summary")
+        if not summary or not isinstance(summary, str):
+            return "ERROR: 'summary' is required — write a concise summary of everything important so far"
+
+        keep_recent = 4
+        try:
+            keep_recent = int(params.get("keep_recent", 4))
+        except (TypeError, ValueError):
+            pass
+        keep_recent = max(2, min(keep_recent, len(self.history)))
+
+        old_len = len(self.history)
+        if old_len <= keep_recent + 1:
+            return f"History is already small ({old_len} messages). No compaction needed."
+
+        # Keep the very first user message (the initial prompt) + the summary
+        # + the most recent `keep_recent` messages verbatim.
+        initial_prompt_msg = self.history[0]   # always the user's original prompt
+        recent_msgs = self.history[-keep_recent:] if keep_recent > 0 else []
+
+        # Build compacted history
+        self.history = [
+            initial_prompt_msg,
+            {"role": "assistant", "content": __import__("json").dumps({
+                "action": "command",
+                "name": "compact_history",
+                "parameters": {"summary": summary},
+            })},
+            {"role": "user", "content": (
+                f"Observation: History compacted. Summary of prior work:\n{summary}"
+            )},
+        ] + recent_msgs
+
+        new_len = len(self.history)
+        dropped = old_len - new_len
+        self._log(step, "compact_history", {"keep_recent": keep_recent}, f"Compacted {old_len} → {new_len} messages (dropped {dropped})")
+
+        if self.verbose:
+            print(f"{self._indent()}   [compact_history] {old_len} → {new_len} messages", file=sys.stderr)
+
+        return f"OK: history compacted from {old_len} to {new_len} messages ({dropped} dropped). Your summary is preserved."
+
     def execute_command(self, name: str, params: dict, step: int) -> str:
         if name == "run_agent":
             return self._run_agent(params, step)
         if name == "call_agent":
             return self._call_agent(params, step)
+        if name == "compact_history":
+            return self._compact_history(params, step)
 
         handler = self.command_handlers.get(name)
         if not handler:
@@ -639,13 +691,20 @@ class Agent:
             if self.verbose:
                 print(f"{self._indent()}[{step:2d}] Calling {self.provider}:{self.model} …", file=sys.stderr)
 
-            system_content = (
-                self.system_prompt
-                + "\n\nENVIRONMENT:\n"
-                + self.environment_context
-            )
-            if self.init_hook_output:
-                system_content += "\n\nINIT HOOK OUTPUT:\n" + self.init_hook_output
+            # Include the environment context only on the first LLM call of
+            # this session so we don't repeat a potentially large block every
+            # turn (it's already visible to the model via earlier history).
+            if self.environment_context and not self._env_context_sent:
+                system_content = (
+                    self.system_prompt
+                    + "\n\nENVIRONMENT:\n"
+                    + self.environment_context
+                )
+                if self.init_hook_output:
+                    system_content += "\n\nINIT HOOK OUTPUT:\n" + self.init_hook_output
+                self._env_context_sent = True
+            else:
+                system_content = self.system_prompt
 
             messages = [{
                 "role": "system",
@@ -773,8 +832,26 @@ class Agent:
 
                     obs = obs[: self.max_output_chars] + "…" if len(obs) > self.max_output_chars else obs
 
+                    # Full obs is shown for the current step; trim what's stored
+                    # in history so old observations don't keep inflating the
+                    # context window on every future API call.
+                    if len(obs) > self.max_obs_history_chars:
+                        history_obs = obs[: self.max_obs_history_chars] + f"\n[…trimmed — {len(obs)} chars total; use read_file/linux_command to retrieve again if needed]"
+                    else:
+                        history_obs = obs
+
                     self.history.append({"role": "assistant", "content": __import__("json").dumps(parsed_item)})
-                    self.history.append({"role": "user", "content": f"Observation: {obs}"})
+
+                    # Add a history-pressure hint so the model knows when to compact
+                    history_chars = sum(len(m.get("content", "")) for m in self.history)
+                    hint = ""
+                    if history_chars > 20000 or len(self.history) > self.max_context_messages - 4:
+                        hint = (
+                            f"\n[context: {len(self.history)} msgs, ~{history_chars} chars"
+                            f" — consider compact_history if you have more work ahead]"
+                        )
+
+                    self.history.append({"role": "user", "content": f"Observation: {history_obs}{hint}"})
 
                     if name != "run_agent":
                         self._log(step, name, params, obs, step_tokens_in, step_tokens_out)

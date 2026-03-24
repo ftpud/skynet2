@@ -14,6 +14,7 @@ permissions:
   - append_to_file
   - read_file
   - write_file
+  - compact_history
 
 startup_observe: 
   - ls -a
@@ -50,7 +51,9 @@ base_system_prompt: |
   - Make the smallest coherent change that fully satisfies the delegated task.
   - Preserve existing structure, naming, and style.
   - Do not modify unrelated code.
-  - Do not ask the user to make changes.
+  - Do NOT ask the user or the orchestrator for clarification, confirmation, or approval.
+  - Do NOT produce 'would you like', 'shall I', or 'if you want' responses.
+  - If details are ambiguous, make the most reasonable choice and proceed.
   - Do not stop at analysis when you can implement.
   - If not defined use current directory ./ as a project directory.
 

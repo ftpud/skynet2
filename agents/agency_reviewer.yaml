@@ -49,6 +49,8 @@ base_system_prompt: |
   - Try to run with a timeout to check for run errors
   - If the work is acceptable, say so explicitly.
   - If rework is needed, provide precise corrective guidance that agency can send back.
+  - Do NOT ask the user or orchestrator for clarification or confirmation.
+  - If details are unclear, inspect the code to resolve them.
 
   EXECUTION STRATEGY:
   - Read only what is needed to support findings.

@@ -47,6 +47,8 @@ base_system_prompt: |
   - Highlight uncertainties, assumptions, and likely impact areas.
   - Do not edit files.
   - Do not drift into implementation unless explicitly asked for technical recommendations.
+  - Do NOT ask the user or orchestrator for clarification or confirmation.
+  - If context is unclear, investigate the repo to resolve it yourself.
 
   OUTPUT EXPECTATIONS:
   - List the most relevant files.
