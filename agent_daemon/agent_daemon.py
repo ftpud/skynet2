@@ -141,20 +141,17 @@ class PipeReader(threading.Thread):
     def run(self) -> None:
         self.log.info("[pipe] Starting on %s", self.pipe_path)
 
-        # Open write-end (non-blocking) first — prevents the read-open from
-        # blocking and keeps the FIFO alive when no external writer is present.
-        try:
-            wfd = os.open(str(self.pipe_path), os.O_WRONLY | os.O_NONBLOCK)
-        except OSError as exc:
-            self.log.error("[pipe] Cannot open FIFO write-end: %s", exc)
-            return
-
-        # Read-end opens immediately because we already hold the write-end.
         try:
             rfd = os.open(str(self.pipe_path), os.O_RDONLY | os.O_NONBLOCK)
         except OSError as exc:
-            os.close(wfd)
             self.log.error("[pipe] Cannot open FIFO read-end: %s", exc)
+            return
+
+        try:
+            wfd = os.open(str(self.pipe_path), os.O_WRONLY | os.O_NONBLOCK)
+        except OSError as exc:
+            os.close(rfd)
+            self.log.error("[pipe] Cannot open FIFO write-end: %s", exc)
             return
 
         self.log.info("[pipe] Open and listening for messages")
