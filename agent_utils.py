@@ -36,7 +36,7 @@ def build_system_prompt(config: dict, command_info: dict, agent_info: dict) -> s
     return f"""You are a {role} agent.
 
 {base}{hooks_text}{tool_use_rules}
-You MUST respond with EXACTLY ONE valid JSON object and nothing else.
+You MUST respond with valid JSON only and nothing else.
 
 Possible actions:
 
@@ -58,7 +58,7 @@ CRITICAL RULES:
 - Use one of the allowed commands below
 - Do not repeat the same action/parameters more than twice
 - NEVER wrap action in final_answer
-- If you need more than one step, return multiple action objects in one JSON array
+- If you need more than one step, return all needed actions together in one JSON array
 - Default expectation: deliver working results, not just a plan
 - Do not stop at analysis when you can continue to implementation, verification, and a concise closeout
 - Prefer dedicated file tools over shell commands when a dedicated tool exists
@@ -87,34 +87,57 @@ SAFETY:
 
 def extract_all_json_actions(text: str) -> list[dict]:
     text = text.strip()
-    decoder = json.JSONDecoder()
-    actions: list[dict] = []
+    if not text:
+        return []
 
-    def _collect_from(src: str):
-        starts = [i for i, ch in enumerate(src) if ch == "{"]
-        for start in starts:
-            try:
-                obj, _end = decoder.raw_decode(src[start:])
-                if isinstance(obj, dict) and obj.get("action") in ("command", "final_answer"):
-                    actions.append(obj)
-            except json.JSONDecodeError:
-                pass
+    def _is_action(obj) -> bool:
+        return isinstance(obj, dict) and obj.get("action") in ("command", "final_answer")
 
-    _collect_from(text)
-    repaired = re.sub(r",\s*([}\]])", r"\1", text)
-    if repaired != text:
-        _collect_from(repaired)
-
-    if actions:
+    def _dedupe(items: list[dict]) -> list[dict]:
         seen = set()
         unique = []
-        for a in actions:
-            key = json.dumps(a, sort_keys=True, ensure_ascii=False)
+        for item in items:
+            key = json.dumps(item, sort_keys=True, ensure_ascii=False)
             if key in seen:
                 continue
             seen.add(key)
-            unique.append(a)
+            unique.append(item)
         return unique
+
+    candidates = [text]
+    repaired = re.sub(r",\s*([}\]])", r"\1", text)
+    if repaired != text:
+        candidates.append(repaired)
+
+    actions: list[dict] = []
+    decoder = json.JSONDecoder()
+
+    for src in candidates:
+        try:
+            parsed = json.loads(src)
+            if _is_action(parsed):
+                return [parsed]
+            if isinstance(parsed, list):
+                list_actions = [item for item in parsed if _is_action(item)]
+                if list_actions:
+                    return _dedupe(list_actions)
+        except json.JSONDecodeError:
+            pass
+
+        starts = [i for i, ch in enumerate(src) if ch in "[{"]
+        for start in starts:
+            try:
+                obj, _end = decoder.raw_decode(src[start:])
+            except json.JSONDecodeError:
+                continue
+
+            if _is_action(obj):
+                actions.append(obj)
+            elif isinstance(obj, list):
+                actions.extend(item for item in obj if _is_action(item))
+
+    if actions:
+        return _dedupe(actions)
 
     depth = 0
     in_string = False
@@ -133,36 +156,34 @@ def extract_all_json_actions(text: str) -> list[dict]:
             continue
         if in_string:
             continue
-        if ch == "{":
+        if ch in "[{":
             if depth == 0:
                 block_start = i
             depth += 1
-        elif ch == "}":
+        elif ch in "]}":
+            if depth == 0:
+                continue
             depth -= 1
             if depth == 0 and block_start is not None:
                 block = text[block_start:i + 1]
-                try:
-                    obj = json.loads(block)
-                    if isinstance(obj, dict) and obj.get("action") in ("command", "final_answer"):
-                        actions.append(obj)
-                except json.JSONDecodeError:
+                try_blocks = [block]
+                repaired_block = re.sub(r",\s*([}\]])", r"\1", block)
+                if repaired_block != block:
+                    try_blocks.append(repaired_block)
+                for candidate in try_blocks:
                     try:
-                        obj = json.loads(re.sub(r",\s*([}\]])", r"\1", block))
-                        if isinstance(obj, dict) and obj.get("action") in ("command", "final_answer"):
-                            actions.append(obj)
+                        obj = json.loads(candidate)
                     except json.JSONDecodeError:
-                        pass
+                        continue
+                    if _is_action(obj):
+                        actions.append(obj)
+                        break
+                    if isinstance(obj, list):
+                        actions.extend(item for item in obj if _is_action(item))
+                        break
                 block_start = None
 
-    seen = set()
-    unique = []
-    for a in actions:
-        key = json.dumps(a, sort_keys=True, ensure_ascii=False)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(a)
-    return unique
+    return _dedupe(actions)
 
 
 def extract_json(text: str) -> dict | None:
@@ -177,12 +198,41 @@ def is_codex(model: str) -> bool:
 def extract_usage(usage, api_type: str) -> tuple[int, int]:
     if usage is None:
         return (0, 0)
+
+    def _read(obj, *names: str) -> int:
+        for name in names:
+            value = getattr(obj, name, None)
+            if value is None and isinstance(obj, dict):
+                value = obj.get(name)
+            if value is not None:
+                try:
+                    return int(value or 0)
+                except Exception:
+                    continue
+        return 0
+
     if api_type == "chat_completions":
         return (
-            int(getattr(usage, "prompt_tokens", 0) or 0),
-            int(getattr(usage, "completion_tokens", 0) or 0),
+            _read(usage, "prompt_tokens", "input_tokens"),
+            _read(usage, "completion_tokens", "output_tokens"),
         )
+
+    if api_type == "responses":
+        input_tokens = _read(usage, "input_tokens", "prompt_tokens")
+        output_tokens = _read(usage, "output_tokens", "completion_tokens")
+
+        input_details = getattr(usage, "input_tokens_details", None)
+        if input_details is None and isinstance(usage, dict):
+            input_details = usage.get("input_tokens_details")
+        output_details = getattr(usage, "output_tokens_details", None)
+        if output_details is None and isinstance(usage, dict):
+            output_details = usage.get("output_tokens_details")
+
+        input_tokens += _read(input_details, "cached_tokens")
+        output_tokens += _read(output_details, "reasoning_tokens")
+        return (input_tokens, output_tokens)
+
     return (
-        int(getattr(usage, "input_tokens", 0) or 0),
-        int(getattr(usage, "output_tokens", 0) or 0),
+        _read(usage, "input_tokens", "prompt_tokens"),
+        _read(usage, "output_tokens", "completion_tokens"),
     )

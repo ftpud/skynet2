@@ -24,6 +24,11 @@
 - `.git/`: Git metadata.
 
 ## Agent Files
+- `agents/agency.yaml`
+- `agents/agency_coder.yaml`
+- `agents/agency_planner.yaml`
+- `agents/agency_researcher.yaml`
+- `agents/agency_reviewer.yaml`
 - `agents/code.yaml`
 - `agents/console.yaml`
 - `agents/gcode.yaml`

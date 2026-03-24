@@ -40,3 +40,63 @@ def test_extract_all_json_actions_ignores_non_action_json():
     assert result == [
         {"action": "command", "name": "read_file", "parameters": {"path": "a.txt"}},
     ]
+
+
+def test_extract_all_json_actions_parses_json_array_of_actions():
+    text = '[{"action":"command","name":"read_file","parameters":{"path":"a.txt"}},{"action":"final_answer","content":"done"}]'
+
+    result = extract_all_json_actions(text)
+
+    assert result == [
+        {"action": "command", "name": "read_file", "parameters": {"path": "a.txt"}},
+        {"action": "final_answer", "content": "done"},
+    ]
+
+
+def test_extract_json_returns_first_action_from_json_array():
+    text = '[{"action":"command","name":"read_file","parameters":{"path":"a.txt"}},{"action":"command","name":"read_file","parameters":{"path":"b.txt"}}]'
+
+    result = extract_json(text)
+
+    assert result == {"action": "command", "name": "read_file", "parameters": {"path": "a.txt"}}
+
+
+def test_extract_all_json_actions_handles_forward_slashes_in_strings():
+    text = '
+'.join([
+        '{"action":"command","name":"read_file","parameters":{"path":"dir/subdir/file.txt"}}',
+        '{"action":"final_answer","content":"https://example.com/a/b"}',
+    ])
+
+    result = extract_all_json_actions(text)
+
+    assert result == [
+        {"action": "command", "name": "read_file", "parameters": {"path": "dir/subdir/file.txt"}},
+        {"action": "final_answer", "content": "https://example.com/a/b"},
+    ]
+
+
+def test_extract_all_json_actions_handles_escaped_forward_slashes_in_strings():
+    text = '{"action":"command","name":"read_file","parameters":{"path":"dir\/subdir\/file.txt"}}'
+
+    result = extract_all_json_actions(text)
+
+    assert result == [
+        {"action": "command", "name": "read_file", "parameters": {"path": "dir/subdir/file.txt"}},
+    ]
+
+
+
+def test_extract_all_json_actions_returns_command_then_final_answer_in_order():
+    text = '
+'.join([
+        '{"action":"command","name":"read_file","parameters":{"path":"a.txt"}}',
+        '{"action":"final_answer","content":"done"}',
+    ])
+
+    result = extract_all_json_actions(text)
+
+    assert result == [
+        {"action": "command", "name": "read_file", "parameters": {"path": "a.txt"}},
+        {"action": "final_answer", "content": "done"},
+    ]

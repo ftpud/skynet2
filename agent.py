@@ -673,18 +673,15 @@ class Agent:
                     time.sleep(0.7)
                     continue
 
-                if self.process_all_json_blocks:
-                    parsed_actions = extract_all_json_actions(full_response)
-                    parsed = parsed_actions[0] if parsed_actions else None
-                else:
-                    parsed = self._extract_json(full_response)
-                    parsed_actions = [parsed] if parsed else None
+                parsed_actions = extract_all_json_actions(full_response)
+                parsed = parsed_actions[0] if parsed_actions else None
                 if parsed:
                     break
 
                 error_feedback = (
                     "Your last response was not valid JSON.\n"
-                    "You MUST output EXACTLY one JSON object with no extra text.\n"
+                    "You MUST output valid JSON only.\n"
+                    "Return either one JSON object or one JSON array of action objects.\n"
                     f"Last response started: {full_response[:180]!r}…"
                 )
                 self.history.append({"role": "user", "content": error_feedback})
@@ -698,7 +695,12 @@ class Agent:
                 return
 
             actions_to_process = parsed_actions or []
-            should_finish = len(actions_to_process) == 1 and actions_to_process[0].get("action") == "final_answer"
+            if not self.process_all_json_blocks and actions_to_process:
+                first_non_final = next((item for item in actions_to_process if item.get("action") != "final_answer"), None)
+                if first_non_final is not None:
+                    actions_to_process = [first_non_final]
+                else:
+                    actions_to_process = [actions_to_process[0]]
 
             for parsed_item in actions_to_process:
                 action = parsed_item.get("action")
