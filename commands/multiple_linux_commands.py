@@ -1,7 +1,7 @@
 import subprocess
 
 COMMAND_NAME = "multiple_linux_commands"
-DESCRIPTION = "Run multiple Linux shell commands in sequence and return all captured outputs chained together."
+DESCRIPTION = "Run multiple shell commands in sequence and return all captured outputs chained together. Prefer dedicated file tools when available."
 USAGE_EXAMPLE = '{"action":"command","name":"multiple_linux_commands","parameters":{"commands":["ls -la","pwd"]}}'
 
 _BLOCKED = [

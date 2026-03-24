@@ -2,7 +2,7 @@ import os
 import subprocess
 
 COMMAND_NAME = "linux_command"
-DESCRIPTION = "Run a Linux shell command and return captured output."
+DESCRIPTION = "Run a shell command and return captured output. Prefer dedicated file tools when available."
 USAGE_EXAMPLE = '{"action":"command","name":"linux_command","parameters":{"command":"ls -la"}}'
 
 _BLOCKED = [

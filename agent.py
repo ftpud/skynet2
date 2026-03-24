@@ -4,7 +4,9 @@ Production-ready lightweight ReAct-style AI Agent
 Follows strict JSON protocol, hierarchical spawning, bounded execution
 """
 
+import json
 import os
+import selectors
 import shlex
 import subprocess
 import sys
@@ -23,28 +25,32 @@ from agent_constants import (
     MAX_AGENT_DEPTH,
     MAX_CHILD_AGENTS,
     MAX_CONTEXT_MESSAGES,
+    MAX_OBS_HISTORY_CHARS,
     MAX_OUTPUT_CHARS,
     MAX_RETRIES_PER_STEP,
     MAX_STEPS,
 )
 from agent_loaders import load_agents, load_commands
 from agent_logging import log_session_end, log_session_start, log_step
-from agent_utils import build_system_prompt, extract_json, extract_usage, is_codex
+from agent_utils import build_system_prompt, extract_all_json_actions, extract_json, extract_usage, is_codex
 
 
 class Agent:
-    def __init__(self, config: dict, model: str, depth: int, agent_name: str, verbose: bool = False, log_path: str | None = None, provider: str = "openai", verbose_log: bool = False, verbose_log_path: str | None = None, provider_override: str | None = None):
+    def __init__(self, config: dict, model: str, depth: int, agent_name: str, verbose: bool = False, log_path: str | None = None, provider: str = "openai", verbose_log: bool = False, verbose_log_path: str | None = None, provider_override: str | None = None, process_all_json_blocks: bool = False):
         self.config = config
         self.model = model
         self.depth = depth
         self.agent_name = agent_name
         self.verbose = verbose
         self.spawned_children = 0
+        self.call_agent_sessions: dict[str, dict] = {}
         self.provider = (provider or "openai").lower()
         self.provider_override = (provider_override.lower() if provider_override else None)
+        self.process_all_json_blocks = process_all_json_blocks
         self.verbose_log = verbose_log
         self.verbose_log_path = verbose_log_path
         self._streaming_line_open = False
+        self.parallel_tool_calls = bool(config.get("parallel_tool_calls", False))
         if self.provider == "openai":
             self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         elif self.provider == "claude":
@@ -59,12 +65,17 @@ class Agent:
         self.session_tokens_in = 0
         self.session_tokens_out = 0
 
-        limits = config.get("limits", {})
+        limits = config.get("limits") or {}
         self.max_steps = limits.get("max_steps", MAX_STEPS)
         self.max_depth = limits.get("max_depth", MAX_AGENT_DEPTH)
         self.max_children = limits.get("max_children", MAX_CHILD_AGENTS)
         self.max_output_chars = MAX_OUTPUT_CHARS
         self.max_context_messages = MAX_CONTEXT_MESSAGES
+        self.max_obs_history_chars = limits.get("max_obs_history_chars", MAX_OBS_HISTORY_CHARS)
+
+        # Track whether the environment context has already been injected once
+        # so we don't repeat it in every subsequent system-prompt call.
+        self._env_context_sent = False
 
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
         self.work_dir = os.getcwd()
@@ -268,9 +279,221 @@ class Agent:
         except Exception as e:
             return f"ERROR: could not start child: {e}"
 
+
+    def _call_agent(self, params: dict, step: int) -> str:
+        if self.depth + 1 > self.max_depth:
+            return "ERROR: maximum nesting depth reached"
+        if self.spawned_children >= self.max_children:
+            return "ERROR: maximum number of child agents reached"
+
+        child_agent = params.get("agent")
+        child_prompt = params.get("prompt")
+        if not child_agent or not child_prompt:
+            return "ERROR: 'agent' and 'prompt' required"
+
+        session_id = str(params.get("session_id") or child_agent)
+        session = self.call_agent_sessions.get(session_id)
+
+        if session is None:
+            self.spawned_children += 1
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            child_log_path = os.path.join(self.logs_dir, f"{child_agent}_{ts}.jsonl")
+            cmd = [
+                sys.executable,
+                os.path.abspath(__file__),
+                "--agent",
+                child_agent,
+                "--prompt",
+                child_prompt,
+                "--depth",
+                str(self.depth + 1),
+                "--log-path",
+                child_log_path,
+                "--keep-session-open",
+            ]
+            if self.provider_override:
+                cmd += ["--provider-override", self.provider_override]
+            if self.verbose_log:
+                cmd += ["--verbose-log"]
+                if self.verbose_log_path:
+                    cmd += ["--verbose-log-path", self.verbose_log_path]
+
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=0,
+                )
+            except Exception as e:
+                return f"ERROR: could not start child: {e}"
+
+            session = {
+                "agent": child_agent,
+                "proc": proc,
+                "log_path": child_log_path,
+                "started": False,
+            }
+            self.call_agent_sessions[session_id] = session
+
+            self._log(
+                step=step,
+                action="call_agent",
+                parameters={"agent": child_agent, "prompt": child_prompt, "session_id": session_id},
+                result=f"child persistent session started | log file → {child_log_path}",
+            )
+        else:
+            proc = session["proc"]
+            if proc.poll() is not None:
+                self.call_agent_sessions.pop(session_id, None)
+                return "ERROR: child session is closed"
+            if session.get("agent") != child_agent:
+                return "ERROR: session_id is already bound to another agent"
+
+            try:
+                assert proc.stdin is not None
+                proc.stdin.write(child_prompt + "\n")
+                proc.stdin.flush()
+            except Exception as e:
+                self.call_agent_sessions.pop(session_id, None)
+                return f"ERROR: failed to send prompt to child: {e}"
+        proc = session["proc"]
+        try:
+            assert proc.stdout is not None
+            assert proc.stderr is not None
+
+            selector = selectors.DefaultSelector()
+            selector.register(proc.stdout, selectors.EVENT_READ)
+            selector.register(proc.stderr, selectors.EVENT_READ)
+
+            stdout_buffer = ""
+            stderr_chunks = []
+            prompt_marker = "\nYou> "
+            saw_prompt = False
+            idle_deadline = time.time() + CHILD_AGENT_TIMEOUT
+
+            while True:
+                if proc.poll() is not None:
+                    try:
+                        remaining_out = proc.stdout.read() or ""
+                        if remaining_out:
+                            stdout_buffer += remaining_out
+                    except Exception:
+                        pass
+                    try:
+                        remaining_err = proc.stderr.read() or ""
+                        if remaining_err:
+                            stderr_chunks.append(remaining_err)
+                    except Exception:
+                        pass
+                    self.call_agent_sessions.pop(session_id, None)
+                    err = "".join(stderr_chunks).strip()[:400]
+                    return f"ERROR: child agent ended unexpectedly\n{err}"
+
+                events = selector.select(timeout=0.2)
+                if not events:
+                    if time.time() >= idle_deadline:
+                        return "ERROR: child agent timed out waiting for response"
+                    continue
+
+                idle_deadline = time.time() + CHILD_AGENT_TIMEOUT
+
+                for key, _ in events:
+                    stream = key.fileobj
+                    try:
+                        data = os.read(stream.fileno(), 4096).decode("utf-8", errors="replace")
+                    except Exception:
+                        data = ""
+
+                    if not data:
+                        continue
+
+                    if stream is proc.stderr:
+                        stderr_chunks.append(data)
+                        continue
+
+                    stdout_buffer += data
+                    if prompt_marker in stdout_buffer or stdout_buffer.endswith("You> "):
+                        saw_prompt = True
+                        break
+
+                if saw_prompt:
+                    break
+
+            selector.close()
+
+            if prompt_marker in stdout_buffer:
+                answer = stdout_buffer.rsplit(prompt_marker, 1)[0].strip()
+            elif stdout_buffer.endswith("You> "):
+                answer = stdout_buffer[:-5].strip()
+            else:
+                return "ERROR: child agent prompt not detected"
+
+            if not session.get("started"):
+                session["started"] = True
+            elif answer.startswith("You>"):
+                answer = answer[4:].strip()
+
+            if not answer:
+                return "ERROR: child returned empty answer"
+            return f"FINAL_ANSWER: {answer}"
+        except Exception as e:
+            self.call_agent_sessions.pop(session_id, None)
+            return f"ERROR: failed reading child output: {e}"
+
+    def _compact_history(self, params: dict, step: int) -> str:
+        """Replace old history messages with a compact summary provided by the model."""
+        summary = params.get("summary")
+        if not summary or not isinstance(summary, str):
+            return "ERROR: 'summary' is required — write a concise summary of everything important so far"
+
+        keep_recent = 4
+        try:
+            keep_recent = int(params.get("keep_recent", 4))
+        except (TypeError, ValueError):
+            pass
+        keep_recent = max(2, min(keep_recent, len(self.history)))
+
+        old_len = len(self.history)
+        if old_len <= keep_recent + 1:
+            return f"History is already small ({old_len} messages). No compaction needed."
+
+        # Keep the very first user message (the initial prompt) + the summary
+        # + the most recent `keep_recent` messages verbatim.
+        initial_prompt_msg = self.history[0]   # always the user's original prompt
+        recent_msgs = self.history[-keep_recent:] if keep_recent > 0 else []
+
+        # Build compacted history
+        self.history = [
+            initial_prompt_msg,
+            {"role": "assistant", "content": json.dumps({
+                "action": "command",
+                "name": "compact_history",
+                "parameters": {"summary": summary},
+            })},
+            {"role": "user", "content": (
+                f"Observation: History compacted. Summary of prior work:\n{summary}"
+            )},
+        ] + recent_msgs
+
+        new_len = len(self.history)
+        dropped = old_len - new_len
+        self._log(step, "compact_history", {"keep_recent": keep_recent}, f"Compacted {old_len} → {new_len} messages (dropped {dropped})")
+
+        if self.verbose:
+            print(f"{self._indent()}   [compact_history] {old_len} → {new_len} messages", file=sys.stderr)
+
+        return f"OK: history compacted from {old_len} to {new_len} messages ({dropped} dropped). Your summary is preserved."
+
     def execute_command(self, name: str, params: dict, step: int) -> str:
         if name == "run_agent":
             return self._run_agent(params, step)
+        if name == "call_agent":
+            return self._call_agent(params, step)
+        if name == "compact_history":
+            return self._compact_history(params, step)
 
         handler = self.command_handlers.get(name)
         if not handler:
@@ -319,7 +542,7 @@ class Agent:
                 in_tokens, out_tokens = self._extract_usage(usage, "responses")
                 self._vend_stream()
                 if parsed_early is not None:
-                    return __import__("json").dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
+                    return json.dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
                 return full_response, in_tokens, out_tokens
 
         elif self.provider == "openai":
@@ -339,18 +562,17 @@ class Agent:
             for chunk in stream:
                 if hasattr(chunk, "usage") and chunk.usage is not None:
                     usage = chunk.usage
+                    in_tokens, out_tokens = self._extract_usage(usage, "chat_completions")
                 delta = chunk.choices[0].delta.content if chunk.choices else None
                 delta = delta or ""
                 if delta:
                     self._vstream(delta)
                 full_response += delta
-                parsed_early = self._extract_json(full_response)
-                if parsed_early is not None:
-                    continue
-                in_tokens, out_tokens = self._extract_usage(usage, "chat_completions")
+                if parsed_early is None:
+                    parsed_early = self._extract_json(full_response)
             self._vend_stream()
             if parsed_early is not None:
-                return __import__("json").dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
+                return json.dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
             return full_response, in_tokens, out_tokens
 
         system_text = ""
@@ -413,7 +635,7 @@ class Agent:
             self._vend_stream()
 
             if parsed_early is not None:
-                return __import__("json").dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
+                return json.dumps(parsed_early, ensure_ascii=False), in_tokens, out_tokens
 
             if stop_reason == "max_tokens" and claude_max_tokens < max_claude_tokens:
                 new_limit = min(claude_max_tokens * 2, max_claude_tokens)
@@ -446,7 +668,6 @@ class Agent:
         return "\n\n".join(results)
 
     def run(self, initial_prompt: str):
-        self.history = []
         self.init_hook_output = self._run_hook("on_run_start", {"AGENT_INITIAL_PROMPT": initial_prompt})
         startup_context = self._run_startup_observations()
 
@@ -457,9 +678,15 @@ class Agent:
             env_parts.append(self.init_hook_output)
         self.environment_context = "\n\n".join(env_parts)
 
+        # Reset so this run's environment context is injected on the first step.
+        self._env_context_sent = False
 
+        if not self.history:
+            self.history = [{"role": "user", "content": initial_prompt}]
+        else:
+            self.history.append({"role": "user", "content": initial_prompt})
 
-        self.history.append({"role": "user", "content": initial_prompt})
+        self.recent_actions = []
         step = 0
 
         while step < self.max_steps:
@@ -467,15 +694,18 @@ class Agent:
             if self.verbose:
                 print(f"{self._indent()}[{step:2d}] Calling {self.provider}:{self.model} …", file=sys.stderr)
 
-            #messages = [{"role": "system", "content": self.system_prompt}] + self.history[-self.max_context_messages :]
-
-            system_content = (
-                self.system_prompt
-                + "\n\nENVIRONMENT:\n"
-                + self.environment_context
-            )
-            if self.init_hook_output:
-                system_content += "\n\nINIT HOOK OUTPUT:\n" + self.init_hook_output
+            # Include the environment context only on the first LLM call of
+            # this session so we don't repeat a potentially large block every
+            # turn (it's already visible to the model via earlier history).
+            if self.environment_context and not self._env_context_sent:
+                system_content = (
+                    self.system_prompt
+                    + "\n\nENVIRONMENT:\n"
+                    + self.environment_context
+                )
+                self._env_context_sent = True
+            else:
+                system_content = self.system_prompt
 
             messages = [{
                 "role": "system",
@@ -483,6 +713,7 @@ class Agent:
             }] + self.history[-self.max_context_messages:]
 
             parsed = None
+            parsed_actions = None
             step_tokens_in = 0
             step_tokens_out = 0
             for attempt in range(1, MAX_RETRIES_PER_STEP + 1):
@@ -502,13 +733,15 @@ class Agent:
                     time.sleep(0.7)
                     continue
 
-                parsed = self._extract_json(full_response)
+                parsed_actions = extract_all_json_actions(full_response)
+                parsed = parsed_actions[0] if parsed_actions else None
                 if parsed:
                     break
 
                 error_feedback = (
                     "Your last response was not valid JSON.\n"
-                    "You MUST output EXACTLY one JSON object with no extra text.\n"
+                    "You MUST output valid JSON only.\n"
+                    "Return either one JSON object or one JSON array of action objects.\n"
                     f"Last response started: {full_response[:180]!r}…"
                 )
                 self.history.append({"role": "user", "content": error_feedback})
@@ -521,91 +754,120 @@ class Agent:
                 self._log_session_end()
                 return
 
-            action = parsed.get("action")
-            if not action:
-                self.history.append({"role": "user", "content": "Missing 'action' field in JSON"})
-                continue
+            actions_to_process = parsed_actions or []
+            if not self.process_all_json_blocks and actions_to_process:
+                first_non_final = next((item for item in actions_to_process if item.get("action") != "final_answer"), None)
+                if first_non_final is not None:
+                    actions_to_process = [first_non_final]
+                else:
+                    actions_to_process = [actions_to_process[0]]
 
-            curr = {"action": action}
-            if action == "command":
-                curr["name"] = parsed.get("name")
-                curr["params"] = parsed.get("parameters", {})
-            self.recent_actions.append(curr)
-            if len(self.recent_actions) > 3:
-                self.recent_actions.pop(0)
-            if len(self.recent_actions) == 3 and len({__import__("json").dumps(d, sort_keys=True) for d in self.recent_actions}) == 1:
-                if self.verbose:
-                    print(f"{self._indent()} → Loop detected — forcing final answer", file=sys.stderr)
-                print("Agent appears stuck in loop. Terminating.")
-                self._log_session_end()
-                return
-
-            if action == "final_answer":
-                content = parsed.get("content", "(no content)")
-                is_invalid = False
-
-                if isinstance(content, str):
-                    stripped = content.strip()
-                    if stripped.startswith("{") and stripped.endswith("}"):
-                        try:
-                            inner = __import__("json").loads(stripped)
-                            if isinstance(inner, dict) and "action" in inner:
-                                is_invalid = True
-                        except Exception:
-                            pass
-
-                if is_invalid:
-                    if self.verbose:
-                        print(f"{self._indent()} → Invalid final_answer (wrapped JSON), retrying...", file=sys.stderr)
-
-                    error_feedback = (
-                        "INVALID OUTPUT:\n"
-                        "You returned JSON inside 'content'. This is not allowed.\n\n"
-                        "You MUST return either:\n"
-                        '1. {"action":"command","name":"...","parameters":{}}\n'
-                        '2. {"action":"final_answer","content":"plain text"}\n\n'
-                        "Do NOT wrap JSON in strings."
-                    )
-
-                    self.history.append({"role": "user", "content": error_feedback})
+            for parsed_item in actions_to_process:
+                action = parsed_item.get("action")
+                if not action:
+                    self.history.append({"role": "user", "content": "Missing 'action' field in JSON"})
                     continue
 
-                if self.verbose:
-                    print(f"\n{self._indent()} → Final answer:", file=sys.stderr)
-
-                print(content)
-                self._log(step, "final_answer", {}, content, step_tokens_in, step_tokens_out)
-                self._log_session_end()
-                return
-
-            elif action == "command":
-                name = parsed.get("name")
-                params = parsed.get("parameters", {})
-                if name not in self.config.get("permissions", []):
-                    obs = "ERROR: this command is not permitted"
-                else:
+                curr = {"action": action}
+                if action == "command":
+                    curr["name"] = parsed_item.get("name")
+                    curr["params"] = parsed_item.get("parameters", {})
+                self.recent_actions.append(curr)
+                if len(self.recent_actions) > 3:
+                    self.recent_actions.pop(0)
+                if len(self.recent_actions) == 3 and len({json.dumps(d, sort_keys=True) for d in self.recent_actions}) == 1:
                     if self.verbose:
-                        print(f"{self._indent()} → {name} {params}", file=sys.stderr)
-                    obs = self.execute_command(name, params, step)
+                        print(f"{self._indent()} → Loop detected — forcing final answer", file=sys.stderr)
+                    self._log(step, "loop_termination", {}, "Agent appears stuck in loop. Terminating.", step_tokens_in, step_tokens_out)
+                    print("Agent appears stuck in loop. Terminating.")
+                    self._log_session_end()
+                    return
 
-                obs = obs[: self.max_output_chars] + "…" if len(obs) > self.max_output_chars else obs
+                if action == "final_answer":
+                    content = parsed_item.get("content", "(no content)")
+                    is_invalid = False
 
-                self.history.append({"role": "assistant", "content": __import__("json").dumps(parsed)})
-                self.history.append({"role": "user", "content": f"Observation: {obs}"})
+                    if isinstance(content, str):
+                        stripped = content.strip()
+                        if stripped.startswith("{") and stripped.endswith("}"):
+                            try:
+                                inner = json.loads(stripped)
+                                if isinstance(inner, dict) and "action" in inner:
+                                    is_invalid = True
+                            except Exception:
+                                pass
 
-                if name != "run_agent":
-                    self._log(step, name, params, obs, step_tokens_in, step_tokens_out)
+                    if is_invalid:
+                        if self.verbose:
+                            print(f"{self._indent()} → Invalid final_answer (wrapped JSON), retrying...", file=sys.stderr)
 
-                if self.verbose:
-                    print(f"{self._indent()}   ↳ {obs[:120]}{'…' if len(obs) > 120 else ''}", file=sys.stderr)
+                        error_feedback = (
+                            "INVALID OUTPUT:\n"
+                            "You returned JSON inside 'content'. This is not allowed.\n\n"
+                            "You MUST return either:\n"
+                            '1. {"action":"command","name":"...","parameters":{}}\n'
+                            '2. {"action":"final_answer","content":"plain text"}\n\n'
+                            "Do NOT wrap JSON in strings."
+                        )
 
-            else:
-                self.history.append({"role": "user", "content": "Invalid action — must be 'command' or 'final_answer'"})
+                        self.history.append({"role": "user", "content": error_feedback})
+                        break
+
+                    if self.verbose:
+                        print(f"\n{self._indent()} → Final answer:", file=sys.stderr)
+
+                    print(content)
+                    self._log(step, "final_answer", {}, content, step_tokens_in, step_tokens_out)
+                    self._log_session_end()
+                    return
+
+                elif action == "command":
+                    name = parsed_item.get("name")
+                    params = parsed_item.get("parameters", {})
+                    if name not in self.config.get("permissions", []):
+                        obs = "ERROR: this command is not permitted"
+                    else:
+                        if self.verbose:
+                            print(f"{self._indent()} → {name} {params}", file=sys.stderr)
+                        obs = self.execute_command(name, params, step)
+
+                    obs = obs[: self.max_output_chars] + "…" if len(obs) > self.max_output_chars else obs
+
+                    # Full obs is shown for the current step; trim what's stored
+                    # in history so old observations don't keep inflating the
+                    # context window on every future API call.
+                    if len(obs) > self.max_obs_history_chars:
+                        history_obs = obs[: self.max_obs_history_chars] + f"\n[…trimmed — {len(obs)} chars total; use read_file/linux_command to retrieve again if needed]"
+                    else:
+                        history_obs = obs
+
+                    self.history.append({"role": "assistant", "content": json.dumps(parsed_item)})
+
+                    # Add a history-pressure hint so the model knows when to compact
+                    history_chars = sum(len(m.get("content", "")) for m in self.history)
+                    hint = ""
+                    if history_chars > 20000 or len(self.history) > self.max_context_messages - 4:
+                        hint = (
+                            f"\n[context: {len(self.history)} msgs, ~{history_chars} chars"
+                            f" — consider compact_history if you have more work ahead]"
+                        )
+
+                    self.history.append({"role": "user", "content": f"Observation: {history_obs}{hint}"})
+
+                    if name != "run_agent":
+                        self._log(step, name, params, obs, step_tokens_in, step_tokens_out)
+
+                    if self.verbose:
+                        print(f"{self._indent()}   ↳ {obs[:120]}{'…' if len(obs) > 120 else ''}", file=sys.stderr)
+
+                else:
+                    self.history.append({"role": "user", "content": "Invalid action — must be 'command' or 'final_answer'"})
 
         if self.verbose:
             print(f"{self._indent()}Reached max steps ({self.max_steps}) without final answer.", file=sys.stderr)
         self._log(step, "max_steps_reached", {}, "terminated without final_answer", 0, 0)
         print("Agent reached maximum step limit without producing a final answer.")
+        self._log_session_end()
 
 
 if __name__ == "__main__":
@@ -630,5 +892,17 @@ if __name__ == "__main__":
         verbose_log=args.verbose_log,
         verbose_log_path=args.verbose_log_path,
         provider_override=args.provider_override,
+        process_all_json_blocks=args.process_all_json_blocks,
     )
-    agent.run(args.prompt)
+
+    current_prompt = args.prompt
+    while True:
+        agent.run(current_prompt)
+        if not args.keep_session_open:
+            break
+        try:
+            current_prompt = input("\nYou> ").strip()
+        except EOFError:
+            break
+        if not current_prompt:
+            break

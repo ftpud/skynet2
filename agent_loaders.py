@@ -29,8 +29,6 @@ def load_commands(base_dir: str) -> tuple[dict, dict]:
             description = getattr(module, "DESCRIPTION", None)
             usage_example = getattr(module, "USAGE_EXAMPLE", None)
             handler = getattr(module, "execute", None)
-            if not callable(handler):
-                handler = getattr(module, "run", None)
 
             if not name or not isinstance(name, str):
                 continue

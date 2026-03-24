@@ -1,6 +1,6 @@
 role: "Coding specialist"
 provider: "openai"
-model: "gpt-5.3-codex"
+model: "gpt-5.4"
 temperature: 0.2
 max_tokens: 128000
 
@@ -11,11 +11,13 @@ permissions:
   - multiple_linux_commands
   - linux_command
   - append_to_file
-  - run_agent
+  - call_agent
   - read_file
   - write_file
+  - compact_history
 
-allowed_agents: []
+allowed_agents:
+  - pcode
 
 startup_observe:
   - ls
@@ -52,8 +54,9 @@ base_system_prompt: |
   GENERAL RULES:
   - Treat every task as a coding task. Execute changes yourself.
   - Do NOT ask the user to modify code.
-  - Do NOT ask for clarification unless absolutely required to proceed.
-  - Do NOT produce 'if you want' answers.
+  - Do NOT ask for clarification, confirmation, or approval — ever.
+  - Do NOT produce 'if you want', 'would you like', or 'shall I' responses.
+  - If details are ambiguous, make the most reasonable choice and proceed.
 
   READING STRATEGY (CRITICAL FOR COST):
   - Start from ./project.md to locate relevant files.
@@ -86,7 +89,10 @@ base_system_prompt: |
   - Verify assumptions by reading code before modifying it.
   - If required information is missing, perform targeted reads instead of guessing.
 
+  CRITICAL:
+  DONT LEAVE UNDONE WORK
+
 limits:
-  max_steps: 30
+  max_steps: 40
   max_depth: 3
   max_children: 5

@@ -29,11 +29,14 @@ def build_system_prompt(config: dict, command_info: dict, agent_info: dict) -> s
             f"- {name}: {script}" for name, script in hooks.items() if script
         ) + "\n"
 
+    tool_use_rules = config.get("tool_use_rules", "").strip()
+    if tool_use_rules:
+        tool_use_rules = "\nTOOL USE:\n" + tool_use_rules + "\n"
+
     return f"""You are a {role} agent.
 
-{base}{hooks_text}
-
-You MUST respond with EXACTLY ONE valid JSON object and nothing else.
+{base}{hooks_text}{tool_use_rules}
+You MUST respond with valid JSON only and nothing else.
 
 Possible actions:
 
@@ -55,8 +58,14 @@ CRITICAL RULES:
 - Use one of the allowed commands below
 - Do not repeat the same action/parameters more than twice
 - NEVER wrap action in final_answer
+- If you need more than one step, return all needed actions together in one JSON array
+- Default expectation: deliver working results, not just a plan
+- Do not stop at analysis when you can continue to implementation, verification, and a concise closeout
+- Prefer dedicated file tools over shell commands when a dedicated tool exists
+- Batch related reads together when possible instead of reading files one-by-one
+- NEVER ask the user for confirmation, clarification, or approval — just execute
+- If details are ambiguous, make the most reasonable choice and proceed
 - Always perform all required steps by commands
-
 
 ALLOWED COMMANDS:
 {cmd_list}
@@ -64,55 +73,80 @@ ALLOWED AGENTS:
 {allowed_agents_list}
 
 STRATEGY:
-- Think step-by-step inside your reasoning (but do NOT output reasoning)
-- Prefer shortest reliable path
-- If command fails → try different approach, do NOT loop
-- Never ask for confirmation
-- Always perform all steps
+- Think first, then act
+- Prefer the shortest reliable path
+- Reuse existing patterns before adding new logic
+- If command fails, try a different approach instead of looping
+- Keep edits minimal, coherent, and behavior-safe
+- End with a concrete result or a precise blocker
+
+CONTEXT MANAGEMENT:
+- Old observations are auto-trimmed; re-read files if you need their full contents again
+- When you see a "[context: … consider compact_history]" hint, call compact_history
+  before your next action if you still have significant work remaining
+- Write a thorough summary: key facts, file paths, line numbers, what was done, what remains
+- Do NOT compact if you are about to give final_answer — just finish
 
 SAFETY:
-- Never run destructive commands (rm -rf, shutdown, etc.)
+- Never run destructive commands unless explicitly requested
+- Never revert user changes you did not make
 """
 
 
-def extract_json(text: str) -> dict | None:
-    text = re.sub(r'(?:json)?', '', text, flags=re.IGNORECASE)
+def extract_all_json_actions(text: str) -> list[dict]:
     text = text.strip()
+    if not text:
+        return []
 
+    def _is_action(obj) -> bool:
+        return isinstance(obj, dict) and obj.get("action") in ("command", "final_answer")
+
+    def _dedupe(items: list[dict]) -> list[dict]:
+        seen = set()
+        unique = []
+        for item in items:
+            key = json.dumps(item, sort_keys=True, ensure_ascii=False)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        return unique
+
+    candidates = [text]
+    repaired = re.sub(r",\s*([}\]])", r"\1", text)
+    if repaired != text:
+        candidates.append(repaired)
+
+    actions: list[dict] = []
     decoder = json.JSONDecoder()
-    starts = [i for i, ch in enumerate(text) if ch == '{']
-    candidates: list[dict] = []
-    for start in starts:
+
+    for src in candidates:
         try:
-            obj, _end = decoder.raw_decode(text[start:])
-            if isinstance(obj, dict) and obj.get("action") in ("command", "final_answer"):
-                return obj
-            if isinstance(obj, dict) and "action" in obj:
-                candidates.append(obj)
+            parsed = json.loads(src)
+            if _is_action(parsed):
+                return [parsed]
+            if isinstance(parsed, list):
+                list_actions = [item for item in parsed if _is_action(item)]
+                if list_actions:
+                    return _dedupe(list_actions)
         except json.JSONDecodeError:
             pass
 
-    if candidates:
-        return candidates[0]
-
-    repaired = re.sub(r',\s*([}\]])', r'\1', text)
-    if repaired != text:
-        starts = [i for i, ch in enumerate(repaired) if ch == '{']
+        starts = [i for i, ch in enumerate(src) if ch in "[{"]
         for start in starts:
             try:
-                obj, _end = decoder.raw_decode(repaired[start:])
-                if isinstance(obj, dict) and obj.get("action") in ("command", "final_answer"):
-                    return obj
-                if isinstance(obj, dict) and "action" in obj:
-                    candidates.append(obj)
+                obj, _end = decoder.raw_decode(src[start:])
             except json.JSONDecodeError:
-                pass
+                continue
 
-    if candidates:
-        return candidates[0]
+            if _is_action(obj):
+                actions.append(obj)
+            elif isinstance(obj, list):
+                actions.extend(item for item in obj if _is_action(item))
 
-    best: dict | None = None
-    best_len = 0
+    if actions:
+        return _dedupe(actions)
+
     depth = 0
     in_string = False
     escape = False
@@ -122,7 +156,7 @@ def extract_json(text: str) -> dict | None:
         if escape:
             escape = False
             continue
-        if ch == '\\' and in_string:
+        if ch == "\\" and in_string:
             escape = True
             continue
         if ch == '"':
@@ -130,31 +164,39 @@ def extract_json(text: str) -> dict | None:
             continue
         if in_string:
             continue
-        if ch == '{':
+        if ch in "[{":
             if depth == 0:
                 block_start = i
             depth += 1
-        elif ch == '}':
+        elif ch in "]}":
+            if depth == 0:
+                continue
             depth -= 1
             if depth == 0 and block_start is not None:
                 block = text[block_start:i + 1]
-                if len(block) > best_len:
+                try_blocks = [block]
+                repaired_block = re.sub(r",\s*([}\]])", r"\1", block)
+                if repaired_block != block:
+                    try_blocks.append(repaired_block)
+                for candidate in try_blocks:
                     try:
-                        obj = json.loads(block)
-                        if isinstance(obj, dict) and obj.get("action") in ("command", "final_answer"):
-                            best = obj
-                            best_len = len(block)
+                        obj = json.loads(candidate)
                     except json.JSONDecodeError:
-                        try:
-                            obj = json.loads(re.sub(r',\s*([}\]])', r'\1', block))
-                            if isinstance(obj, dict) and obj.get("action") in ("command", "final_answer"):
-                                best = obj
-                                best_len = len(block)
-                        except json.JSONDecodeError:
-                            pass
+                        continue
+                    if _is_action(obj):
+                        actions.append(obj)
+                        break
+                    if isinstance(obj, list):
+                        actions.extend(item for item in obj if _is_action(item))
+                        break
                 block_start = None
 
-    return best
+    return _dedupe(actions)
+
+
+def extract_json(text: str) -> dict | None:
+    actions = extract_all_json_actions(text)
+    return actions[0] if actions else None
 
 
 def is_codex(model: str) -> bool:
@@ -164,12 +206,33 @@ def is_codex(model: str) -> bool:
 def extract_usage(usage, api_type: str) -> tuple[int, int]:
     if usage is None:
         return (0, 0)
+
+    def _read(obj, *names: str) -> int:
+        for name in names:
+            value = getattr(obj, name, None)
+            if value is None and isinstance(obj, dict):
+                value = obj.get(name)
+            if value is not None:
+                try:
+                    return int(value or 0)
+                except Exception:
+                    continue
+        return 0
+
     if api_type == "chat_completions":
         return (
-            int(getattr(usage, "prompt_tokens", 0) or 0),
-            int(getattr(usage, "completion_tokens", 0) or 0),
+            _read(usage, "prompt_tokens", "input_tokens"),
+            _read(usage, "completion_tokens", "output_tokens"),
         )
+
+    if api_type == "responses":
+        input_tokens = _read(usage, "input_tokens", "prompt_tokens")
+        output_tokens = _read(usage, "output_tokens", "completion_tokens")
+        # NOTE: cached_tokens and reasoning_tokens are already included in
+        # input_tokens and output_tokens respectively — do NOT add them again.
+        return (input_tokens, output_tokens)
+
     return (
-        int(getattr(usage, "input_tokens", 0) or 0),
-        int(getattr(usage, "output_tokens", 0) or 0),
+        _read(usage, "input_tokens", "prompt_tokens"),
+        _read(usage, "output_tokens", "completion_tokens"),
     )

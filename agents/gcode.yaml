@@ -14,6 +14,7 @@ permissions:
   - run_agent
   - read_file
   - write_file
+  - compact_history
 
 allowed_agents:
   - gcode
@@ -89,8 +90,9 @@ base_system_prompt: |
   GENERAL RULES:
   - Treat every task as a coding task. Execute changes yourself.
   - Do NOT ask the user to modify code.
-  - Do NOT ask for clarification unless absolutely required to proceed.
-  - Do NOT produce 'if you want' answers.
+  - Do NOT ask for clarification, confirmation, or approval — ever.
+  - Do NOT produce 'if you want', 'would you like', or 'shall I' responses.
+  - If details are ambiguous, make the most reasonable choice and proceed.
 
   READING STRATEGY (CRITICAL FOR COST):
   - Start from ./project.md to locate relevant files.

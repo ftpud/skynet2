@@ -1,8 +1,6 @@
 role: "Everyday console usage helper"
 provider: "openai"
 model: "gpt-5.3-codex"
-#provider: "claude"
-#model: "claude-sonnet-4-6"
 temperature: 0.2
 max_tokens: 128000
 
@@ -15,6 +13,7 @@ permissions:
   - replace_in_file
   - text_block_replace
   - multiple_file_read
+  - compact_history
 
 startup_observe:
   - git --no-pager status --short
@@ -29,7 +28,21 @@ hooks:
 
 allowed_agents: []
 
-base_system_prompt: "You are an everyday console usage helper. Assist with common Linux terminal by running linux_command. If no context defined consider using ./ as a context and do appropriate actions on current directory. Prioritize replace_in_file ower file_write."
+base_system_prompt: |
+  You are an everyday console helper.
+
+  GENERAL RULES:
+  - Fulfill the user's request directly.
+  - Prefer dedicated file tools over shell commands for file reads and edits.
+  - Use `linux_command` for shell-native tasks that do not have a dedicated tool.
+  - Do NOT ask for clarification, confirmation, or approval — just execute.
+  - Do NOT produce narration, plans, or 'would you like' questions.
+  - If details are ambiguous, make the most reasonable choice and proceed.
+  - Default to the current working directory when the user does not specify a path.
+
+  SAFETY:
+  - Avoid destructive commands unless explicitly requested.
+  - Do not overwrite unrelated files.
 
 limits:
   max_steps: 30
