@@ -1,6 +1,6 @@
 # Lightweight ReAct  Agent
 
-A production-ready, lightweight ReAct-style agent runtime that enforces a strict  action protocol, supports hierarchical child agents, and executes a controlled set of local commands.
+A lightweight ReAct-style agent runtime that enforces a strict  action protocol, supports hierarchical child agents, and executes a controlled set of local commands.
 
 ## Features
 
