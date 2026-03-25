@@ -6,6 +6,7 @@ Follows strict JSON protocol, hierarchical spawning, bounded execution
 
 import json
 import os
+import re
 import selectors
 import shlex
 import subprocess
@@ -97,6 +98,11 @@ class Agent:
         self.session_reset_mode = str(config.get("session_reset_mode", "summary")).lower()
         self._last_final_answer: str = ""
         self._task_count: int = 0
+
+        # Strict execution mode: reject final_answer responses that ask
+        # for confirmation/clarification instead of executing.  Enabled by
+        # default — the model should always act, never ask.
+        self.strict_execution = bool(config.get("strict_execution", True))
 
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
         self.work_dir = os.getcwd()
@@ -542,6 +548,63 @@ class Agent:
                 f"~{old_chars} chars freed"
             )
 
+    # Patterns that indicate the model is asking for confirmation/clarification
+    # instead of executing.  Used by strict_execution mode to reject and retry.
+    _CONFIRMATION_PATTERNS = re.compile(
+        r"(?i)"
+        r"(?:would you like|shall I|should I|do you want|want me to|"
+        r"let me know if|please confirm|if you(?:'d| would) like|"
+        r"I can (?:also |proceed |go ahead )|"
+        r"before I proceed|ready to proceed|"
+        r"awaiting (?:your |further )|"
+        r"need (?:your |more )(?:input|guidance|confirmation|clarification|direction)|"
+        r"please (?:let me know|provide|specify|clarify)|"
+        r"if you(?:'re| are) happy|is that (?:ok|okay|correct|right)\??|"
+        r"I(?:'ll| will) wait|(?:what|which) (?:do you|would you) prefer)"
+    )
+
+    # Patterns that indicate a plan/proposal without execution
+    _PLAN_ONLY_PATTERNS = re.compile(
+        r"(?i)"
+        r"(?:here(?:'s| is) (?:my |the |a )?(?:plan|proposal|approach|strategy|outline)|"
+        r"I (?:recommend|suggest|propose) (?:the following|we|that)|"
+        r"steps? (?:to|for|I would)|"
+        r"the following (?:changes|steps|approach)|"
+        r"I would (?:start|begin|first|then)|"
+        r"here(?:'s| is) what I(?:'d| would) do)"
+    )
+
+    def _is_confirmation_seeking(self, content: str) -> str | None:
+        """Check if a final_answer is asking for confirmation instead of
+        delivering results.  Returns a rejection reason or None if OK."""
+        if not self.strict_execution:
+            return None
+        if not isinstance(content, str):
+            return None
+
+        text = content.strip()
+        # Very short answers are usually genuine
+        if len(text) < 30:
+            return None
+
+        # Check for confirmation-seeking language
+        match = self._CONFIRMATION_PATTERNS.search(text)
+        if match:
+            return f"confirmation-seeking: '{match.group()}'"
+
+        # Check for plan-only responses (no execution)
+        # Only flag if this is early in the run (step < max_steps/2)
+        # and the response doesn't mention completed work
+        if self._PLAN_ONLY_PATTERNS.search(text):
+            done_indicators = re.compile(
+                r"(?i)(?:done|completed|finished|implemented|fixed|updated|created|"
+                r"applied|changed|modified|replaced|wrote|added|removed|deleted)"
+            )
+            if not done_indicators.search(text):
+                return f"plan-only without execution"
+
+        return None
+
     # Commands whose large string params are payload the model never needs
     # to re-see in history (it can re-read the file instead).  Only the
     # target path / identifier matters.
@@ -973,6 +1036,28 @@ class Agent:
                         )
 
                         self.history.append({"role": "user", "content": error_feedback})
+                        break
+
+                    # Strict execution: reject answers that ask for confirmation
+                    # or propose a plan without executing.
+                    rejection_reason = self._is_confirmation_seeking(str(content))
+                    if rejection_reason:
+                        if self.verbose:
+                            print(f"{self._indent()} → Rejected final_answer ({rejection_reason}), forcing execution...", file=sys.stderr)
+
+                        error_feedback = (
+                            "REJECTED: You returned a response that asks for confirmation or "
+                            "proposes a plan without executing it.\n\n"
+                            "This is NOT allowed. You MUST:\n"
+                            "- Execute the task yourself using commands\n"
+                            "- NEVER ask the user for confirmation, clarification, or approval\n"
+                            "- NEVER propose a plan and stop — execute the plan\n"
+                            "- Make reasonable assumptions when details are ambiguous\n\n"
+                            "DO THE WORK NOW. Use {\"action\":\"command\",...} to proceed."
+                        )
+
+                        self.history.append({"role": "user", "content": error_feedback})
+                        self._log(step, "rejected_confirmation", {}, f"Rejected: {rejection_reason}", step_tokens_in, step_tokens_out)
                         break
 
                     if self.verbose:

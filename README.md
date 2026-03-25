@@ -101,6 +101,9 @@ echo "run the nightly test suite" > /tmp/skynet2_code.fifo
 | `swarm_analyst` | gpt-5.4-mini | Swarm participant — analysis and requirements |
 | `swarm_coder` | gpt-5.3-codex | Swarm participant — implementation |
 | `swarm_critic` | gpt-5.4-mini | Swarm participant — review and consensus |
+| `anime_reviewer` | gpt-5.4-mini | Anime swarm — balanced review (story, characters, visuals) |
+| `anime_critic` | gpt-5.4-mini | Anime swarm — sharp evidence-based criticism |
+| `anime_chaos_critic` | gpt-5.4-mini | Anime swarm — contrarian provocateur, stirs debate |
 
 ---
 
@@ -175,6 +178,11 @@ hooks:
 # "keep"              — old behaviour, no cleanup (history snowballs)
 session_reset_mode: summary
 
+# Reject final_answer responses that ask for confirmation or propose
+# a plan without executing.  Enabled by default.
+# Set to false for agents that legitimately need user interaction (e.g. ask_user).
+strict_execution: true
+
 # Per-agent overrides for global limits
 limits:
   max_steps: 30
@@ -226,6 +234,41 @@ response_timeout: 300  # seconds per agent turn
 | `startup_observe` | agent yaml | Context injected only on first step, capped to 8k per command |
 | `max_chars_per_file` | `multiple_file_read` param | Per-file read cap |
 | `start_line` / `end_line` | `read_file` param | Read only relevant lines |
+
+---
+
+## Strict execution
+
+By default, agents are **not allowed** to ask for confirmation, clarification,
+or approval.  They must execute the task themselves and return results — never
+proposals.
+
+This is enforced at two levels:
+
+1. **System prompt** — tells the model that confirmation-seeking responses are
+   auto-rejected by the runtime.
+2. **Runtime detection** — if a `final_answer` contains phrases like "would you
+   like", "shall I", "should I", "let me know", or proposes a plan without
+   executing it, the answer is **rejected** and the model is forced to retry
+   and do the actual work.
+
+Detected patterns include:
+- Confirmation-seeking: "would you like", "shall I", "should I", "do you want",
+  "let me know", "please confirm", "before I proceed", "I'll wait", etc.
+- Plan-only responses: "here's my plan", "I recommend the following", "steps to",
+  "here's what I'd do" — rejected unless the response also mentions completed
+  work (done/fixed/updated/etc.)
+
+```yaml
+# Enabled by default — disable for agents that need user interaction
+strict_execution: true    # default
+# strict_execution: false # for ask_user-capable agents
+```
+
+In verbose mode (`-v`), rejected responses are logged:
+```
+→ Rejected final_answer (confirmation-seeking: 'Would you like'), forcing execution...
+```
 
 ---
 

@@ -3,6 +3,7 @@
 > This document describes what skynet2 **can do**, how to compose its parts, and what it costs.
 > For installation and CLI flags see [README.md](README.md).
 > For the swarm system specifically see [swarm.md](swarm.md).
+> For context window formation and truncation details see [token_usage.md](token_usage.md).
 
 ---
 
@@ -51,6 +52,13 @@ The interesting part is the **composition layer** on top of that loop: agents ca
 │  Write→1-line sum  Write→[N chars]    Model-initiated trim      │
 │  Head+tail reads   Env context once   Session reset (auto)      │
 │  Line-range reads  Per-file limits    Sliding 20-msg window     │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  QUALITY CONTROLS                                               │
+│                                                                 │
+│  Strict execution  Verbose preview    Loop detection            │
+│  No confirmations  Context sizes      Stuck → force stop        │
+│  No plan-only      per-msg breakdown  Auto-retry on reject      │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -344,6 +352,67 @@ and total ~180 K input + ~15 K output across 8 turns — **50% more expensive**.
 
 ---
 
+## Strict execution
+
+By default (`strict_execution: true`), every agent is **forbidden** from asking
+for confirmation, clarification, or approval.  The model must execute the task
+and return results — never proposals, never "would you like me to…" responses.
+
+This is enforced at **two levels**:
+
+### System prompt
+The system prompt includes a `STRICT EXECUTION` block that explicitly warns the
+model that violations are runtime-enforced and auto-rejected.
+
+### Runtime detection
+When the model returns a `final_answer`, the runtime scans it for:
+
+| Pattern type | Examples |
+|---|---|
+| **Confirmation-seeking** | "would you like", "shall I", "should I", "do you want", "let me know", "please confirm", "before I proceed", "I'll wait" |
+| **Plan-only** (no execution) | "here's my plan", "I recommend the following", "steps to", "here's what I'd do" — rejected unless the response also mentions completed work |
+
+When a violation is detected:
+1. The `final_answer` is **rejected** (not printed, not returned)
+2. An error message is injected into history telling the model to execute
+3. The step loop continues — the model gets another chance to do the work
+4. The rejection is logged as `rejected_confirmation` in the step log
+
+```yaml
+# Enabled by default — disable only for agents that need user interaction
+strict_execution: true    # default
+# strict_execution: false # for ask_user-capable interactive agents
+```
+
+In verbose mode:
+```
+→ Rejected final_answer (confirmation-seeking: 'Would you like'), forcing execution...
+```
+
+---
+
+## Verbose context preview
+
+With `-v`, every step prints a breakdown of the context about to be sent to the
+LLM, showing each message's role, a 40-char content preview, and its size:
+
+```
+[context] 7 msgs, ~8.2k chars
+  [system] You are a Coding specialist a…: 4.1k
+  [user  ] Add input validation to regis…: 62
+  [assist] {"action":"command","name":"re…: 120
+  [user  ] Observation: --- api/users.py…: 3.5k
+  [assist] {"action":"command","name":"re…: 148
+  [user  ] Observation: replace_in_file:…: 52
+  [user  ] Run the tests to verify: 28
+```
+
+Use this to diagnose unexpected token usage — you can immediately see which
+messages are dominating the input cost and whether observations are being
+compressed properly.
+
+---
+
 ## Cost control strategies
 
 > For the full technical breakdown of how context windows are built and
@@ -361,6 +430,7 @@ These optimisations are always active:
 | **Startup observe output capped to 8k** | Prevents 300k in system prompt |
 | **History pressure hints** | Triggers `compact_history` when needed |
 | **Session reset between tasks** (`summary` mode default) | ~95% of prior task history |
+| **Strict execution** (auto-rejects confirmation-seeking answers) | Prevents wasted plan-only cycles |
 
 ### 1. Right-size the agent
 | Task | Recommended agent | Why |
@@ -419,7 +489,7 @@ model: gpt-5.4-mini   # cheaper for reasoning-light summarisation
 0 3 * * *  echo "update dependencies in requirements.txt" > /tmp/skynet2_code.fifo
 0 4 * * 1  echo "generate CHANGELOG for this week"      > /tmp/skynet2_code.fifo
 ```
-The daemon processes tasks overnight.  Because the session persists, the agent that fixed tests at 2AM already has the repo map in memory when it updates deps at 3AM.
+The daemon processes tasks overnight.  With `session_reset_mode: summary` (default), each task starts nearly clean with just a one-line recap of the last result, preventing token snowballing across tasks.
 
 ---
 
@@ -453,13 +523,18 @@ Each agent reads the room, researches from the codebase, posts structured findin
 ```
 You> Implement the user preferences API endpoint
   → agent plans, reads files, writes code, runs tests
+  → session reset: history replaced with brief recap
 
 You> Also add pagination to the list endpoint
-  → agent already knows the codebase from turn 1
+  → agent starts clean, re-reads what it needs (recap gives continuity)
 
 You> The tests are failing on Python 3.10, fix it
-  → agent applies fix without re-reading everything
+  → agent starts clean again, recap mentions prior work
 ```
+
+Each follow-up task starts nearly clean (brief recap only), so token costs
+stay flat instead of snowballing.  Set `session_reset_mode: keep` if you
+need full history continuity at the cost of growing input tokens.
 
 ---
 
@@ -620,6 +695,7 @@ python swarm.py --summary --room-file rooms/my-meeting.jsonl
 | `CHILD_AGENT_TIMEOUT` | 600 s | hardcoded |
 | `MAX_RETRIES_PER_STEP` | 3 | hardcoded |
 | `session_reset_mode` | `summary` | `session_reset_mode` in agent yaml |
+| `strict_execution` | `true` | `strict_execution` in agent yaml |
 
 ---
 
@@ -650,5 +726,10 @@ Swarm (collaborative room)
   swarm_analyst → analysis and requirements
   swarm_coder   → proposals and implementation
   swarm_critic  → review, risks, consensus driving
+
+Anime swarm (anime_swarm.yaml — review meeting)
+  anime_reviewer      → balanced review: story, characters, visuals, audience fit
+  anime_critic        → sharp evidence-based criticism, challenges weak claims
+  anime_chaos_critic  → contrarian provocateur, stirs debate, pressure-tests consensus
 ```
 

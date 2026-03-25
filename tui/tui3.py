@@ -2,7 +2,10 @@
 import json
 import os
 import re
+import select
 import sys
+import termios
+import tty
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -175,13 +178,15 @@ def spark(values, width=24):
     return "".join(out)
 
 
-def load_data(log_dir: Path, now_local: datetime):
+def load_data(log_dir: Path, now_local: datetime, session_since: datetime = None):
     end_local = now_local.replace(second=0, microsecond=0)
     if end_local < START_TIME:
         end_local = START_TIME
 
     since_start_exact = APP_START_TIME
     start_of_today = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    if session_since is None:
+        session_since = since_start_exact
 
     total_minutes = int((end_local - START_TIME).total_seconds() // 60) + 1
     buckets_local = [START_TIME + timedelta(minutes=i) for i in range(total_minutes)]
@@ -195,10 +200,18 @@ def load_data(log_dir: Path, now_local: datetime):
     per_model_today = defaultdict(int)
     per_model_input_today = defaultdict(int)
     per_model_output_today = defaultdict(int)
+    # Session-scoped counters (since session_since)
+    per_model_input_session = defaultdict(int)
+    per_model_output_session = defaultdict(int)
+    per_model_total_session = defaultdict(int)
     sessions = []
 
     if not log_dir.exists():
-        return buckets_local, per_model, per_model_input, per_model_output, per_model_total, per_model_since_start, per_model_today, per_model_input_today, per_model_output_today, sessions
+        return (buckets_local, per_model, per_model_input, per_model_output,
+                per_model_total, per_model_since_start, per_model_today,
+                per_model_input_today, per_model_output_today,
+                per_model_input_session, per_model_output_session,
+                per_model_total_session, sessions)
 
     for path in sorted(log_dir.rglob("*.jsonl")):
         starts = []
@@ -228,16 +241,24 @@ def load_data(log_dir: Path, now_local: datetime):
                                 per_model_since_start[model] += total
                             if ts_local_for_since >= start_of_today:
                                 per_model_today[model] += total
+                            if ts_local_for_since >= session_since:
+                                per_model_total_session[model] += total
                     if inp:
                         per_model_input[model] += inp
                         session_input += inp
-                        if ts_local_for_since is not None and ts_local_for_since >= start_of_today:
-                            per_model_input_today[model] += inp
+                        if ts_local_for_since is not None:
+                            if ts_local_for_since >= start_of_today:
+                                per_model_input_today[model] += inp
+                            if ts_local_for_since >= session_since:
+                                per_model_input_session[model] += inp
                     if out:
                         per_model_output[model] += out
                         session_output += out
-                        if ts_local_for_since is not None and ts_local_for_since >= start_of_today:
-                            per_model_output_today[model] += out
+                        if ts_local_for_since is not None:
+                            if ts_local_for_since >= start_of_today:
+                                per_model_output_today[model] += out
+                            if ts_local_for_since >= session_since:
+                                per_model_output_session[model] += out
                     if ts is not None:
                         ts_local = ts.astimezone(LOCAL_TZ)
                         if START_TIME <= ts_local < (end_local + timedelta(minutes=1)):
@@ -279,7 +300,11 @@ def load_data(log_dir: Path, now_local: datetime):
         key=lambda s: s.get("last_ts") or s.get("start_ts") or datetime.min.replace(tzinfo=LOCAL_TZ),
         reverse=True,
     )
-    return buckets_local, per_model, per_model_input, per_model_output, per_model_total, per_model_since_start, per_model_today, per_model_input_today, per_model_output_today, sessions
+    return (buckets_local, per_model, per_model_input, per_model_output,
+            per_model_total, per_model_since_start, per_model_today,
+            per_model_input_today, per_model_output_today,
+            per_model_input_session, per_model_output_session,
+            per_model_total_session, sessions)
 
 
 def build_tree_panel(sessions):
@@ -395,7 +420,7 @@ def build_tree_panel(sessions):
     return Panel(root, title="Work tree", box=box.SIMPLE)
 
 
-def build_tokens_panel(sessions):
+def build_tokens_panel(sessions, mode="total", session_since=None):
     table = Table(box=box.SIMPLE_HEAVY, expand=True)
     table.add_column("Agent", no_wrap=True, style="cyan")
     table.add_column("Status", no_wrap=True)
@@ -411,6 +436,12 @@ def build_tokens_panel(sessions):
             key=lambda s: s.get("last_ts") or s.get("start_ts") or datetime.min.replace(tzinfo=LOCAL_TZ),
             reverse=True,
         )
+        # In session mode, filter to sessions that overlap with session_since
+        if mode == "session" and session_since is not None:
+            ordered = [
+                s for s in ordered
+                if (s.get("last_ts") or s.get("start_ts") or datetime.min.replace(tzinfo=LOCAL_TZ)) >= session_since
+            ]
         for s in ordered[:8]:
             status = "running" if s.get("end_ts") is None else "done"
             inp = int(s.get("input_tokens", 0) or 0)
@@ -426,20 +457,25 @@ def build_tokens_panel(sessions):
                 format_human_number(total),
             )
 
-    return Panel(table, title="Current/Recent execution", box=box.SIMPLE)
+    mode_label = "Session" if mode == "session" else "All"
+    return Panel(table, title=f"Current/Recent execution ({mode_label})", box=box.SIMPLE)
 
 
-def build_usage_by_model_table(per_model_input, per_model_output, per_model_total, per_model_since_start):
+def build_usage_by_model_table(per_model_input, per_model_output, per_model_total, per_model_since_start, mode="total"):
     table = Table(box=box.SIMPLE_HEAVY, expand=True)
     table.add_column("Model", style="cyan", no_wrap=True)
     table.add_column("In", justify="right", style="green")
     table.add_column("Out", justify="right", style="yellow")
     table.add_column("Total", justify="right", style="magenta")
-    table.add_column("Since start", justify="right", style="bright_magenta")
+    if mode == "total":
+        table.add_column("Since start", justify="right", style="bright_magenta")
 
     models = set(per_model_total.keys()) | set(per_model_input.keys()) | set(per_model_output.keys())
     if not models:
-        table.add_row("(no data)", "0", "0", "0", "0")
+        row = ["(no data)", "0", "0", "0"]
+        if mode == "total":
+            row.append("0")
+        table.add_row(*row)
     else:
         rows = []
         for model in models:
@@ -452,24 +488,35 @@ def build_usage_by_model_table(per_model_input, per_model_output, per_model_tota
                 total = inp + out
             rows.append((model, inp, out, total))
         for model, inp, out, total in sorted(rows, key=lambda r: r[3], reverse=True):
-            since_start = int(per_model_since_start.get(model, 0) or 0)
-            table.add_row(
+            row = [
                 model,
                 format_human_number(inp),
                 format_human_number(out),
                 format_human_number(total),
-                format_human_number(since_start),
-            )
+            ]
+            if mode == "total":
+                since_start = int(per_model_since_start.get(model, 0) or 0)
+                row.append(format_human_number(since_start))
+            table.add_row(*row)
 
-    return Panel(table, title="Token totals by model", box=box.SIMPLE)
+    title = "Token totals by model (Session)" if mode == "session" else "Token totals by model"
+    return Panel(table, title=title, box=box.SIMPLE)
 
 
-def build_today_usage_by_model_table(per_model_input_today, per_model_output_today, per_model_today):
+def build_today_usage_by_model_table(per_model_input_today, per_model_output_today, per_model_today, mode="total"):
     table = Table(box=box.SIMPLE_HEAVY, expand=True)
     table.add_column("Model", style="cyan", no_wrap=True)
-    table.add_column("Today In", justify="right", style="green")
-    table.add_column("Today Out", justify="right", style="yellow")
-    table.add_column("Today Total", justify="right", style="bright_magenta")
+
+    if mode == "session":
+        label_in, label_out, label_total = "Sess In", "Sess Out", "Sess Total"
+        title = "Token usage this session by model"
+    else:
+        label_in, label_out, label_total = "Today In", "Today Out", "Today Total"
+        title = "Token usage today by model"
+
+    table.add_column(label_in, justify="right", style="green")
+    table.add_column(label_out, justify="right", style="yellow")
+    table.add_column(label_total, justify="right", style="bright_magenta")
 
     models = set(per_model_today.keys()) | set(per_model_input_today.keys()) | set(per_model_output_today.keys())
     if not models:
@@ -493,7 +540,7 @@ def build_today_usage_by_model_table(per_model_input_today, per_model_output_tod
                 format_human_number(total),
             )
 
-    return Panel(table, title="Token usage today by model", box=box.SIMPLE)
+    return Panel(table, title=title, box=box.SIMPLE)
 
 
 def build_total_usage_panel(buckets, per_model):
@@ -516,18 +563,58 @@ def build_total_usage_panel(buckets, per_model):
     return Panel(body, title="Per-minute usage (all models)", subtitle=subtitle, box=box.SIMPLE)
 
 
-def build_view():
+def build_status_bar(mode, session_since):
+    now = datetime.now().astimezone(LOCAL_TZ)
+    elapsed = now - session_since
+    mins = int(elapsed.total_seconds() // 60)
+    secs = int(elapsed.total_seconds() % 60)
+    session_str = f"{session_since.strftime('%H:%M:%S')} ({mins}m{secs:02d}s ago)"
+
+    mode_s = "[bold bright_green]●[/bold bright_green] Session" if mode == "session" else "[dim]○[/dim] Session"
+    mode_t = "[bold bright_green]●[/bold bright_green] Total" if mode == "total" else "[dim]○[/dim] Total"
+
+    return Panel(
+        f"  {mode_s}  [dim]|[/dim]  {mode_t}  [dim]|[/dim]  "
+        f"Session since: [cyan]{session_str}[/cyan]  [dim]|[/dim]  "
+        f"[bold](S)[/bold]ession  [bold](T)[/bold]otal  [bold](R)[/bold]eset session  [bold](Q)[/bold]uit",
+        box=box.SIMPLE,
+        style="dim",
+    )
+
+
+def build_view(mode="total", session_since=None):
+    if session_since is None:
+        session_since = APP_START_TIME
     now_local = datetime.now().astimezone(LOCAL_TZ)
-    buckets, per_model, per_model_input, per_model_output, per_model_total, per_model_since_start, per_model_today, per_model_input_today, per_model_output_today, sessions = load_data(LOG_DIR, now_local)
+    (buckets, per_model, per_model_input, per_model_output,
+     per_model_total, per_model_since_start, per_model_today,
+     per_model_input_today, per_model_output_today,
+     per_model_input_session, per_model_output_session,
+     per_model_total_session, sessions) = load_data(LOG_DIR, now_local, session_since)
+
+    # Choose data source based on mode
+    if mode == "session":
+        model_in = per_model_input_session
+        model_out = per_model_output_session
+        model_tot = per_model_total_session
+        today_in = per_model_input_session
+        today_out = per_model_output_session
+        today_tot = per_model_total_session
+    else:
+        model_in = per_model_input
+        model_out = per_model_output
+        model_tot = per_model_total
+        today_in = per_model_input_today
+        today_out = per_model_output_today
+        today_tot = per_model_today
 
     layout = Layout()
     layout.split_column(
+        Layout(build_status_bar(mode, session_since), size=3),
         Layout(build_tree_panel(sessions), ratio=3),
-        Layout(build_tokens_panel(sessions), ratio=1),
-        Layout(build_usage_by_model_table(per_model_input, per_model_output, per_model_total, per_model_since_start), ratio=1),
-        Layout(build_today_usage_by_model_table(per_model_input_today, per_model_output_today, per_model_today), ratio=1),
-        
-        #Layout(build_total_usage_panel(buckets, per_model), ratio=1),
+        Layout(build_tokens_panel(sessions, mode=mode, session_since=session_since), ratio=1),
+        Layout(build_usage_by_model_table(model_in, model_out, model_tot, per_model_since_start, mode=mode), ratio=1),
+        Layout(build_today_usage_by_model_table(today_in, today_out, today_tot, mode=mode), ratio=1),
     )
     return layout
 
@@ -544,17 +631,50 @@ def _restart_self():
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
+def _read_key():
+    """Non-blocking single key read.  Returns the key char or None."""
+    if select.select([sys.stdin], [], [], 0)[0]:
+        return sys.stdin.read(1)
+    return None
+
+
 def main():
     console = Console()
     sig = _self_signature(SELF_PATH)
-    with Live(build_view(), console=console, refresh_per_second=4, screen=True) as live:
-        import time
-        while True:
-            time.sleep(REFRESH_SECONDS)
-            new_sig = _self_signature(SELF_PATH)
-            if new_sig is not None and sig is not None and new_sig != sig:
-                _restart_self()
-            live.update(build_view())
+
+    # State
+    mode = "session"  # "session" or "total"
+    session_since = APP_START_TIME
+
+    # Save terminal settings and switch to raw mode for key input
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        with Live(build_view(mode, session_since), console=console, refresh_per_second=4, screen=True) as live:
+            import time
+            while True:
+                # Poll for keypress (non-blocking)
+                key = _read_key()
+                if key:
+                    k = key.lower()
+                    if k == "q":
+                        break
+                    elif k == "s":
+                        mode = "session"
+                    elif k == "t":
+                        mode = "total"
+                    elif k == "r":
+                        session_since = datetime.now().astimezone(LOCAL_TZ)
+
+                time.sleep(REFRESH_SECONDS)
+                new_sig = _self_signature(SELF_PATH)
+                if new_sig is not None and sig is not None and new_sig != sig:
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    _restart_self()
+                live.update(build_view(mode, session_since))
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
 if __name__ == "__main__":
