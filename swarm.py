@@ -253,12 +253,12 @@ class SwarmCoordinator:
         result = subprocess.run(
             cmd,
             env=env,
-            capture_output=not self.args.verbose,
+            capture_output=True,
             text=True,
             timeout=self.response_timeout,
         )
 
-        if self.args.verbose and result.stderr:
+        if result.stderr:
             for line in result.stderr.strip().splitlines():
                 self.log.debug("    [%s stderr] %s", agent_name, line)
 
@@ -266,7 +266,23 @@ class SwarmCoordinator:
             err = (result.stderr or "").strip()[:300]
             raise RuntimeError(f"exit={result.returncode}: {err}")
 
-        return (result.stdout or "").strip()
+        stdout = (result.stdout or "").strip()
+        if stdout:
+            lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+            if lines:
+                stdout = lines[-1]
+
+        if not stdout and result.stderr:
+            stderr_lines = [line.strip() for line in result.stderr.splitlines() if line.strip()]
+            for line in reversed(stderr_lines):
+                if line.startswith("["):
+                    continue
+                if line.startswith("{") and '"action"' in line:
+                    continue
+                stdout = line
+                break
+
+        return stdout
 
     # ── prompt builder ────────────────────────────────────────────────────────
 
