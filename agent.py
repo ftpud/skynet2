@@ -202,29 +202,43 @@ class Agent:
             return f"{n / 1_000:.1f}k"
         return str(n)
 
-    def _vprint_context(self, messages: list[dict]):
+    def _vprint_context(self, messages: list[dict], estimated_input_tokens: int | None = None):
         """Print a compact preview of every message about to be sent to the
         LLM so you can see at a glance what's eating your input tokens.
 
         Format per message::
 
-            [role  ] first 40 chars of con…: 12.4k
+            [role  ] first 40 chars of con…: 12.4k chars (~3.1k tok)
 
         Plus a totals line.
         """
         if not self.verbose:
             return
-        total = sum(len(m.get("content", "")) for m in messages)
-        self._vprint(f"[context] {len(messages)} msgs, ~{self._format_char_size(total)} chars")
+
+        def _estimate_tokens(text: str) -> int:
+            if not text:
+                return 0
+            return max(1, (len(text) + 3) // 4)
+
+        total_chars = sum(len(m.get("content", "")) for m in messages)
+        total_tokens = int(estimated_input_tokens) if estimated_input_tokens is not None else sum(
+            _estimate_tokens(m.get("content", "")) for m in messages
+        )
+        self._vprint(
+            f"[Total tokens spent:~{self._format_char_size(total_tokens)}]\n[context] {len(messages)} msgs, {self._format_char_size(total_chars)} chars."
+        )
         role_labels = {"system": "system", "user": "user  ", "assistant": "assist"}
         for m in messages:
             role = role_labels.get(m.get("role", ""), m.get("role", "?"))
             content = m.get("content", "")
-            size = len(content)
+            size_chars = len(content)
+            size_tokens = _estimate_tokens(content)
             preview = content[:40].replace("\n", "↵").replace("\r", "")
             if len(content) > 40:
                 preview += "…"
-            self._vprint(f"  [{role}] {preview}: {self._format_char_size(size)}")
+            self._vprint(
+                f"  [{role}] {preview}: {self._format_char_size(size_chars)} chars (~{self._format_char_size(size_tokens)} tok)"
+            )
         self._vprint()
 
     def _log(self, step: int, action: str, parameters: dict, result: str, step_tokens_in: int = 0, step_tokens_out: int = 0):
@@ -935,12 +949,15 @@ class Agent:
                 "content": system_content
             }] + self.history[-self.max_context_messages:]
 
-            self._vprint_context(messages)
 
             parsed = None
             parsed_actions = None
             step_tokens_in = 0
             step_tokens_out = 0
+
+            estimated_input_tokens = self.session_tokens_in + step_tokens_in
+            self._vprint_context(messages, estimated_input_tokens=estimated_input_tokens if estimated_input_tokens > 0 else None)
+
             for attempt in range(1, MAX_RETRIES_PER_STEP + 1):
                 if self.verbose and attempt > 1:
                     print(f"{self._indent()}   retry {attempt}/{MAX_RETRIES_PER_STEP}", file=sys.stderr)

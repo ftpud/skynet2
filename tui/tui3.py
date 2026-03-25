@@ -97,54 +97,52 @@ def extract_usage(record):
         or "unknown"
     )
 
-    tokens_dict = record.get("tokens") or {}
-    inp = tokens_dict.get("input")
-    if inp is None:
-        inp = tokens_dict.get("inbound")
-    out = tokens_dict.get("output")
-    if out is None:
-        out = tokens_dict.get("outbound")
-    total = tokens_dict.get("total")
+    def _to_int(value, default=None):
+        try:
+            if value is None:
+                return default
+            return int(value)
+        except Exception:
+            return default
 
+    tokens_dict = record.get("tokens") or {}
     usage = record.get("usage") or record.get("response", {}).get("usage") or {}
 
+    inp = _to_int(tokens_dict.get("input"))
     if inp is None:
-        inp = usage.get("input_tokens")
+        inp = _to_int(tokens_dict.get("inbound"))
     if inp is None:
-        inp = usage.get("prompt_tokens")
+        inp = _to_int(usage.get("input_tokens"))
+    if inp is None:
+        inp = _to_int(usage.get("prompt_tokens"))
+    if inp is None:
+        inp = _to_int(record.get("input_tokens"))
+    if inp is None:
+        inp = _to_int(record.get("in_tokens"))
     if inp is None:
         inp = 0
 
+    out = _to_int(tokens_dict.get("output"))
     if out is None:
-        out = usage.get("output_tokens")
+        out = _to_int(tokens_dict.get("outbound"))
     if out is None:
-        out = usage.get("completion_tokens")
+        out = _to_int(usage.get("output_tokens"))
+    if out is None:
+        out = _to_int(usage.get("completion_tokens"))
+    if out is None:
+        out = _to_int(record.get("output_tokens"))
+    if out is None:
+        out = _to_int(record.get("out_tokens"))
     if out is None:
         out = 0
 
-    try:
-        inp = int(inp)
-    except Exception:
-        inp = 0
-
-    try:
-        out = int(out)
-    except Exception:
-        out = 0
-
-    if total is not None:
-        try:
-            total = int(total)
-        except Exception:
-            total = inp + out
-    else:
-        total = usage.get("total_tokens")
-        if total is None:
-            total = inp + out
-        try:
-            total = int(total)
-        except Exception:
-            total = inp + out
+    total = _to_int(tokens_dict.get("total"))
+    if total is None:
+        total = _to_int(usage.get("total_tokens"))
+    if total is None:
+        total = _to_int(record.get("total_tokens"))
+    if total is None:
+        total = inp + out
 
     ts = (
         parse_ts(record.get("timestamp"))
@@ -231,6 +229,12 @@ def load_data(log_dir: Path, now_local: datetime, session_since: datetime = None
                     except Exception:
                         continue
 
+                    rtype = rec.get("type")
+                    if rtype == "session_end":
+                        if rec.get("timestamp"):
+                            ends.append(rec)
+                        continue
+
                     ts, model, agent, inp, out, total = extract_usage(rec)
                     ts_local_for_since = ts.astimezone(LOCAL_TZ) if ts is not None else None
                     if total:
@@ -267,11 +271,8 @@ def load_data(log_dir: Path, now_local: datetime, session_since: datetime = None
                             if idx is not None:
                                 per_model[model][idx] += total
 
-                    rtype = rec.get("type")
                     if rtype == "session_start":
                         starts.append(rec)
-                    elif rtype == "session_end":
-                        ends.append(rec)
                     elif rtype == "step":
                         steps.append(rec)
         except Exception:
@@ -293,7 +294,7 @@ def load_data(log_dir: Path, now_local: datetime, session_since: datetime = None
                 "last_ts": end_ts or (parse_ts(steps[-1].get("timestamp")) if steps else start_ts),
                 "input_tokens": session_input,
                 "output_tokens": session_output,
-                "total_tokens": session_total if session_total > 0 else (session_input + session_output),
+                "total_tokens": session_input + session_output,
             })
 
     sessions.sort(
@@ -558,7 +559,7 @@ def build_total_usage_panel(buckets, per_model):
     else:
         shown = minute_labels
 
-    body = f"\nTotal tokens: {format_human_number(total_tokens)}\n{chart}"
+    body = f"\nTotal tokens (step/session totals): {format_human_number(total_tokens)}\n{chart}"
     subtitle = f"per-minute total tokens (all models) | {' '.join(shown)}"
     return Panel(body, title="Per-minute usage (all models)", subtitle=subtitle, box=box.SIMPLE)
 
