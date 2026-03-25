@@ -45,6 +45,10 @@
 - `agents/swarm_analyst.yaml` ← analysis specialist swarm participant
 - `agents/swarm_coder.yaml` ← implementation specialist swarm participant
 - `agents/swarm_critic.yaml` ← review/quality specialist swarm participant
+- `agents/play_swarm.yaml` ← roleplay swarm meeting config with three character participants
+- `agents/kapeh.yaml` ← dramatic roleplay character for play_swarm
+- `agents/ftpud.yaml` ← witty mischievous roleplay character for play_swarm
+- `agents/oleg.yaml` ← grounded cinematic roleplay character for play_swarm
 
 ## Commands
 - `append_to_file`

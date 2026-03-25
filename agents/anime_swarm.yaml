@@ -11,7 +11,7 @@ participants:
   - anime_critic
   - anime_chaos_critic
 
-max_rounds: 4
+max_rounds: 6
 done_threshold: 3
 response_timeout: 500
 
