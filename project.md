@@ -1,85 +1,80 @@
 # Project Map
 
-## Main Python Files
-- `agent.py`: Main orchestrator.
-- `agent_cli.py`: CLI parsing and runtime config loading.
-- `agent_constants.py`: Shared execution limits.
-- `agent_loaders.py`: Command and agent config discovery.
-- `agent_logging.py`: Logging helpers.
-- `agent_utils.py`: System prompt builder, JSON extraction, and token helpers.
-- `swarm.py`: Multi-agent meeting room coordinator.
+## Actual Tree Structure
+```text
+.
+├── .gitignore
+├── LICENSE.md
+├── PROJECT_OVERVIEW.md
+├── README.md
+├── agent.py
+├── agent_cli.py
+├── agent_constants.py
+├── agent_daemon/
+│   ├── agent_daemon.py
+│   ├── logs/
+│   └── requirements.txt
+├── agent_loaders.py
+├── agent_logging.py
+├── agent_utils.py
+├── agents/
+│   ├── agency.yaml
+│   ├── agency_coder.yaml
+│   ├── agency_planner.yaml
+│   ├── agency_researcher.yaml
+│   ├── agency_reviewer.yaml
+│   ├── anime_chaos_critic.yaml
+│   ├── anime_critic.yaml
+│   ├── anime_reviewer.yaml
+│   ├── anime_swarm.yaml
+│   ├── code.yaml
+│   ├── console.yaml
+│   ├── gcode.yaml
+│   ├── pcode.yaml
+│   ├── plan.yaml
+│   ├── planner.yaml
+│   ├── review.yaml
+│   ├── smart_code.yaml
+│   ├── sonnet.yaml
+│   ├── swarm.yaml
+│   ├── swarm_analyst.yaml
+│   ├── swarm_coder.yaml
+│   ├── swarm_critic.yaml
+│   └── test.yaml
+├── commands/
+│   ├── append_to_file.py
+│   ├── apply_patch.py
+│   ├── ask_user.py
+│   ├── call_agent.py
+│   ├── compact_history.py
+│   ├── linux_command.py
+│   ├── ls.py
+│   ├── multiple_file_read.py
+│   ├── multiple_linux_commands.py
+│   ├── read_file.py
+│   ├── replace_in_file.py
+│   ├── replace_in_multiple_files.py
+│   ├── room_post.py
+│   ├── room_read.py
+│   ├── run_agent.py
+│   ├── text_block_replace.py
+│   └── write_file.py
+├── project.md
+├── rooms/
+│   └── *.jsonl
+├── swarm.md
+├── swarm.py
+├── tests/
+│   ├── test_apply_patch.py
+│   ├── test_extract_actions.py
+│   ├── test_extract_json.py
+│   └── test_text_block_replace.py
+├── token_usage.md
+└── tui/
+    └── tui3.py
+```
 
-## Top-Level Files
-- `README.md` — quick-start, CLI reference, agent/command inventory
-- `PROJECT_OVERVIEW.md` — capabilities, scenarios, token economics, use cases
-- `token_usage.md` — deep dive on context window formation, truncation pipeline, walked examples
-- `swarm.md` — swarm meeting system deep-dive
-- `ARCHITECTURE.md` — runtime internals and design decisions
-- `project.md` — this file (navigation map for agents)
-- `.gitignore`
-
-## Directories
-- `agents/`: Agent YAML configs.
-- `commands/`: Command implementations.
-- `rooms/`: Swarm meeting room JSONL files (created at runtime).
-- `tests/`: Test files.
-- `tui/`: Terminal UI.
-- `logs/`: Runtime logs.
-- `agent_daemon/`: Persistent pipe-driven daemon.
-
-## Agent Files
-- `agents/agency.yaml`
-- `agents/agency_coder.yaml`
-- `agents/agency_planner.yaml`
-- `agents/agency_researcher.yaml`
-- `agents/agency_reviewer.yaml`
-- `agents/code.yaml`
-- `agents/console.yaml`
-- `agents/gcode.yaml`
-- `agents/pcode.yaml`
-- `agents/plan.yaml`
-- `agents/planner.yaml`
-- `agents/review.yaml`
-- `agents/smart_code.yaml`
-- `agents/sonnet.yaml`
-- `agents/swarm.yaml` ← swarm meeting config (participants, rounds, thresholds)
-- `agents/swarm_analyst.yaml` ← analysis specialist swarm participant
-- `agents/swarm_coder.yaml` ← implementation specialist swarm participant
-- `agents/swarm_critic.yaml` ← review/quality specialist swarm participant
-- `agents/play_swarm.yaml` ← roleplay swarm meeting config with three character participants
-- `agents/kapeh.yaml` ← dramatic roleplay character for play_swarm
-- `agents/ftpud.yaml` ← witty mischievous roleplay character for play_swarm
-- `agents/oleg.yaml` ← grounded cinematic roleplay character for play_swarm
-
-## Commands
-- `append_to_file`
-- `apply_patch`
-- `ask_user`
-- `call_agent`
-- `compact_history`
-- `linux_command`
-- `ls`
-- `multiple_file_read`
-- `multiple_linux_commands`
-- `read_file`
-- `replace_in_file`
-- `replace_in_multiple_files`
-- `room_post` ← post to shared swarm meeting room
-- `room_read` ← read shared swarm meeting room
-- `run_agent`
-- `text_block_replace`
-- `write_file`
-
-## Tests
-- `tests/test_apply_patch.py`
-- `tests/test_extract_actions.py`
-- `tests/test_extract_json.py`
-- `tests/test_text_block_replace.py`
-
-## TUI
-- `tui/tui3.py`
-
-- agents/anime_swarm.yaml: Anime-focused swarm meeting config with three reviewer/critic participants.
-- agents/anime_reviewer.yaml: Balanced anime reviewer agent for anime_swarm.
-- agents/anime_critic.yaml: Critical anime reviewer agent for anime_swarm.
-- agents/anime_chaos_critic.yaml: Contrarian anime critic agent for anime_swarm.
+## Notes
+- Omitted runtime/cache-only directories from the tree: `.git/`, `__pycache__/`, `.pytest_cache/`, top-level `logs/`, and nested `__pycache__/` folders.
+- `rooms/` contains many runtime-generated JSONL meeting transcripts, so it is summarized as `*.jsonl`.
+- `agent_daemon/logs/` exists as a runtime log directory.
