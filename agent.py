@@ -90,6 +90,14 @@ class Agent:
         # so we don't repeat it in every subsequent system-prompt call.
         self._env_context_sent = False
 
+        # Kept-session optimization: how to handle history between tasks.
+        # "reset"   – drop all history, start clean (default, best for tokens)
+        # "summary" – keep a 1-line summary of the previous task's outcome
+        # "keep"    – old behavior, keep everything (snowball)
+        self.session_reset_mode = str(config.get("session_reset_mode", "summary")).lower()
+        self._last_final_answer: str = ""
+        self._task_count: int = 0
+
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
         self.work_dir = os.getcwd()
         self.logs_dir = os.path.join(self.base_dir, "logs")
@@ -179,6 +187,39 @@ class Agent:
                 except Exception:
                     pass
             self._streaming_line_open = False
+
+    @staticmethod
+    def _format_char_size(n: int) -> str:
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f}M"
+        if n >= 1_000:
+            return f"{n / 1_000:.1f}k"
+        return str(n)
+
+    def _vprint_context(self, messages: list[dict]):
+        """Print a compact preview of every message about to be sent to the
+        LLM so you can see at a glance what's eating your input tokens.
+
+        Format per message::
+
+            [role  ] first 40 chars of con…: 12.4k
+
+        Plus a totals line.
+        """
+        if not self.verbose:
+            return
+        total = sum(len(m.get("content", "")) for m in messages)
+        self._vprint(f"[context] {len(messages)} msgs, ~{self._format_char_size(total)} chars")
+        role_labels = {"system": "system", "user": "user  ", "assistant": "assist"}
+        for m in messages:
+            role = role_labels.get(m.get("role", ""), m.get("role", "?"))
+            content = m.get("content", "")
+            size = len(content)
+            preview = content[:40].replace("\n", "↵").replace("\r", "")
+            if len(content) > 40:
+                preview += "…"
+            self._vprint(f"  [{role}] {preview}: {self._format_char_size(size)}")
+        self._vprint()
 
     def _log(self, step: int, action: str, parameters: dict, result: str, step_tokens_in: int = 0, step_tokens_out: int = 0):
         log_step(self.log_path, self.agent_name, self.provider, self.model, self.depth, step, action, parameters, result, step_tokens_in, step_tokens_out)
@@ -455,6 +496,51 @@ class Agent:
         except Exception as e:
             self.call_agent_sessions.pop(session_id, None)
             return f"ERROR: failed reading child output: {e}"
+
+    def _reset_for_new_task(self):
+        """Reset history between tasks in a kept-open session to avoid
+        snowballing input tokens.  Controlled by ``session_reset_mode``
+        (config key ``session_reset_mode``):
+
+        * ``"reset"``   – nuke all history, start completely fresh.
+        * ``"summary"`` – keep a single user message with a one-line recap
+                          of the previous task so the model has minimal
+                          continuity (default).
+        * ``"keep"``    – legacy behaviour, don't touch history at all.
+        """
+        mode = self.session_reset_mode
+
+        if mode == "keep":
+            return  # old behaviour — do nothing
+
+        old_len = len(self.history)
+        old_chars = sum(len(m.get("content", "")) for m in self.history)
+
+        if mode == "reset":
+            self.history = []
+        else:
+            # "summary" (default)
+            if self._last_final_answer:
+                recap = self._last_final_answer[:600]
+                if len(self._last_final_answer) > 600:
+                    recap += " …"
+                self.history = [
+                    {"role": "user", "content":
+                     f"[context] Previous task (#{self._task_count}) completed. "
+                     f"Summary of result:\n{recap}"},
+                ]
+            else:
+                self.history = []
+
+        self.recent_actions = []
+
+        if self.verbose:
+            new_len = len(self.history)
+            self._vprint(
+                f"[session reset] mode={mode} | "
+                f"dropped {old_len}→{new_len} msgs, "
+                f"~{old_chars} chars freed"
+            )
 
     def _compact_history(self, params: dict, step: int) -> str:
         """Replace old history messages with a compact summary provided by the model."""
@@ -735,6 +821,8 @@ class Agent:
                 "content": system_content
             }] + self.history[-self.max_context_messages:]
 
+            self._vprint_context(messages)
+
             parsed = None
             parsed_actions = None
             step_tokens_in = 0
@@ -840,6 +928,8 @@ class Agent:
                         print(f"\n{self._indent()} → Final answer:", file=sys.stderr)
 
                     print(content)
+                    self._last_final_answer = str(content)
+                    self._task_count += 1
                     self._log(step, "final_answer", {}, content, step_tokens_in, step_tokens_out)
                     self._log_session_end()
                     return
@@ -929,3 +1019,4 @@ if __name__ == "__main__":
             break
         if not current_prompt:
             break
+        agent._reset_for_new_task()
