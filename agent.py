@@ -955,8 +955,7 @@ class Agent:
             step_tokens_in = 0
             step_tokens_out = 0
 
-            estimated_input_tokens = self.session_tokens_in + step_tokens_in
-            self._vprint_context(messages, estimated_input_tokens=estimated_input_tokens if estimated_input_tokens > 0 else None)
+            self._vprint_context(messages, estimated_input_tokens=self.session_tokens_in if self.session_tokens_in > 0 else None)
 
             for attempt in range(1, MAX_RETRIES_PER_STEP + 1):
                 if self.verbose and attempt > 1:

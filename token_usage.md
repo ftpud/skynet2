@@ -8,6 +8,11 @@
 
 ## 1. What gets sent on every LLM call
 
+- `session_tokens_in/out` accumulate the API-reported usage from each step.
+- The verbose context header shows the real total input tokens spent so far
+  from API usage already returned, not a pre-call estimate for the current step.
+
+
 Each step in the agent loop makes one API call.  The **input** to that call is
 assembled from three layers:
 
