@@ -29,10 +29,20 @@ from agent_constants import (
     MAX_OUTPUT_CHARS,
     MAX_RETRIES_PER_STEP,
     MAX_STEPS,
+    OBSERVATION_COMPACT_PREVIEW_CHARS,
+    OBSERVATION_FILE_PREVIEW_CHARS,
+    OBSERVATION_GENERIC_PREVIEW_CHARS,
 )
 from agent_loaders import load_agents, load_commands
 from agent_logging import log_session_end, log_session_start, log_step
-from agent_utils import build_system_prompt, extract_all_json_actions, extract_json, extract_usage, is_codex
+from agent_utils import (
+    build_system_prompt,
+    compress_observation,
+    extract_all_json_actions,
+    extract_json,
+    extract_usage,
+    is_codex,
+)
 
 
 class Agent:
@@ -72,6 +82,9 @@ class Agent:
         self.max_output_chars = MAX_OUTPUT_CHARS
         self.max_context_messages = MAX_CONTEXT_MESSAGES
         self.max_obs_history_chars = limits.get("max_obs_history_chars", MAX_OBS_HISTORY_CHARS)
+        self.observable_file_preview_chars = limits.get("observable_file_preview_chars", OBSERVATION_FILE_PREVIEW_CHARS)
+        self.observable_generic_preview_chars = limits.get("observable_generic_preview_chars", OBSERVATION_GENERIC_PREVIEW_CHARS)
+        self.observable_compact_preview_chars = limits.get("observable_compact_preview_chars", OBSERVATION_COMPACT_PREVIEW_CHARS)
 
         # Track whether the environment context has already been injected once
         # so we don't repeat it in every subsequent system-prompt call.
@@ -509,6 +522,16 @@ class Agent:
 
     def _extract_usage(self, usage, api_type: str) -> tuple[int, int]:
         return extract_usage(usage, api_type)
+
+    def _summarize_command_result(self, action: str, result: str) -> str:
+        result = result or ""
+        size = len(result.encode("utf-8", errors="ignore"))
+        lines = result.count("\n") + (1 if result else 0)
+        if action in {"write_file", "append_to_file", "text_block_replace"}:
+            return f"{action}: ok ({size} bytes, {lines} lines)"
+        if action in {"read_file", "multiple_file_read", "linux_command", "multiple_linux_commands", "ls"}:
+            return f"{action}: output suppressed ({size} bytes, {lines} lines)"
+        return result
 
     def _call_model(self, messages: list[dict]) -> tuple[str, int, int]:
         temperature = self.config.get("temperature", 0.0 if self._is_codex() else 0.7)

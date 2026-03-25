@@ -1,0 +1,21 @@
+# Anime swarm meeting configuration
+# Used by swarm.py — not a runnable agent config.
+# Points to the agents that will participate in the meeting,
+# controls rounds and consensus detection.
+
+role: "Anime swarm meeting"
+description: "Multi-agent anime review meeting. Participants critique anime, debate each other, and converge on recommendations and verdicts."
+
+participants:
+  - anime_reviewer
+  - anime_critic
+  - anime_chaos_critic
+
+max_rounds: 4
+done_threshold: 3
+response_timeout: 500
+
+# Optional: provider/model overrides applied to all participants
+# (can also be overridden per-agent in their individual yaml files)
+# provider: openai
+# model: gpt-5.4-mini

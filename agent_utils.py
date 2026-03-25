@@ -236,3 +236,40 @@ def extract_usage(usage, api_type: str) -> tuple[int, int]:
         _read(usage, "input_tokens", "prompt_tokens"),
         _read(usage, "output_tokens", "completion_tokens"),
     )
+
+
+FILE_OBSERVATION_RE = re.compile(r"(?ms)^---\s+([^\n]+?)\s+---\n")
+
+
+def _compress_text_block(body: str, limit: int) -> str:
+    body = body.strip("\n")
+    if len(body) <= limit:
+        return body
+    head = body[: max(0, limit // 2)].rstrip()
+    tail_budget = max(0, limit - len(head) - 32)
+    tail = body[-tail_budget:].lstrip() if tail_budget else ""
+    omitted = max(0, len(body) - len(head) - len(tail))
+    if not tail:
+        return f"{head}\n[…omitted {omitted} chars…]"
+    return f"{head}\n[…omitted {omitted} chars…]\n{tail}"
+
+
+def compress_observation(text: str, file_preview_chars: int = 1200, generic_preview_chars: int = 4000, compact_preview_chars: int = 2000) -> str:
+    text = (text or "").strip()
+    if not text:
+        return text
+
+    matches = list(FILE_OBSERVATION_RE.finditer(text))
+    if matches:
+        parts = []
+        for i, m in enumerate(matches):
+            start = m.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            name = m.group(1).strip()
+            body = text[start:end]
+            compressed = _compress_text_block(body, file_preview_chars)
+            parts.append(f"--- {name} ---\n{compressed}".rstrip())
+        joined = "\n\n".join(parts)
+        return _compress_text_block(joined, compact_preview_chars)
+
+    return _compress_text_block(text, generic_preview_chars)

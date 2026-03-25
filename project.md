@@ -73,3 +73,8 @@
 
 ## TUI
 - `tui/tui3.py`
+
+- agents/anime_swarm.yaml: Anime-focused swarm meeting config with three reviewer/critic participants.
+- agents/anime_reviewer.yaml: Balanced anime reviewer agent for anime_swarm.
+- agents/anime_critic.yaml: Critical anime reviewer agent for anime_swarm.
+- agents/anime_chaos_critic.yaml: Contrarian anime critic agent for anime_swarm.

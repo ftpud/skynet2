@@ -16,7 +16,7 @@ participants:
 max_rounds: 4
 
 # Stop early when this many distinct agents have posted type=done
-done_threshold: 2
+done_threshold: 3
 
 # Seconds allowed per agent turn
 response_timeout: 300

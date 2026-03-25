@@ -1,6 +1,9 @@
 MAX_STEPS = 30
 MAX_RETRIES_PER_STEP = 3
 MAX_OUTPUT_CHARS = 300000
+OBSERVATION_FILE_PREVIEW_CHARS = 1200
+OBSERVATION_GENERIC_PREVIEW_CHARS = 4000
+OBSERVATION_COMPACT_PREVIEW_CHARS = 2000
 # Observations are trimmed to this length before being stored in history.
 # Much smaller than MAX_OUTPUT_CHARS so old observations don't bloat the
 # context window on every subsequent API call.
