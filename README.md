@@ -169,12 +169,21 @@ hooks:
   on_run_finish: |
     echo "Tokens used: $AGENT_SESSION_TOKENS_IN in / $AGENT_SESSION_TOKENS_OUT out"
 
+# How to handle history between tasks in --keep-session-open mode
+# "summary" (default) — keep a brief recap of the last task
+# "reset"             — nuke all history, start completely fresh
+# "keep"              — old behaviour, no cleanup (history snowballs)
+session_reset_mode: summary
+
 # Per-agent overrides for global limits
 limits:
   max_steps: 30
   max_depth: 3
   max_children: 5
-  max_obs_history_chars: 8000   # per-observation cap in stored history
+  max_obs_history_chars: 8000              # per-observation compression threshold
+  observable_file_preview_chars: 1200      # per-file cap in multi-file compression
+  observable_generic_preview_chars: 4000   # head+tail target for generic observations
+  observable_compact_preview_chars: 2000   # overall cap after multi-file compression
 
 # Injected verbatim at the start of the system prompt
 base_system_prompt: |
@@ -201,13 +210,20 @@ response_timeout: 300  # seconds per agent turn
 
 ## Token budget controls
 
+> For a deep dive with step-by-step examples and diagrams, see
+> **[token_usage.md](token_usage.md)**.
+
 | Mechanism | Where | Effect |
 |---|---|---|
 | `max_steps` in limits | agent yaml | Hard cap on LLM calls per run |
-| `max_context_messages: 20` | agent_constants.py | Sliding history window |
-| `max_obs_history_chars: 8000` | limits / constant | Truncates stored observations |
+| `max_context_messages: 20` | agent_constants.py | Sliding history window — only last 20 msgs sent |
+| `max_obs_history_chars: 8000` | limits / constant | Threshold for observation compression |
+| **Observation compression** | automatic | Write commands → 1-line summary; read commands > 8k → head+tail (keeps both start and end) |
+| **Action payload compaction** | automatic | Write-command payloads stored as `[N chars]` in history, not the full content |
 | `compact_history` command | any agent | Model-initiated mid-session summarisation |
-| `startup_observe` | agent yaml | Context injected only on first step, not repeated |
+| **History pressure hints** | automatic | `[context: N msgs, ~Nk chars — consider compact_history]` appended when history grows large |
+| `session_reset_mode` | agent yaml | Auto-reset history between tasks in `--keep-session-open` (`summary` / `reset` / `keep`) |
+| `startup_observe` | agent yaml | Context injected only on first step, capped to 8k per command |
 | `max_chars_per_file` | `multiple_file_read` param | Per-file read cap |
 | `start_line` / `end_line` | `read_file` param | Read only relevant lines |
 

@@ -47,8 +47,10 @@ The interesting part is the **composition layer** on top of that loop: agents ca
 ├─────────────────────────────────────────────────────────────────┤
 │  COST CONTROLS                                                  │
 │                                                                 │
-│  History trimming  Observation cap    compact_history           │
-│  Line-range reads  Per-file limits    Env context once          │
+│  Obs compression   Action compaction  compact_history           │
+│  Write→1-line sum  Write→[N chars]    Model-initiated trim      │
+│  Head+tail reads   Env context once   Session reset (auto)      │
+│  Line-range reads  Per-file limits    Sliding 20-msg window     │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -68,13 +70,25 @@ Suitable for: CI steps, git hooks, Makefile targets, anything you'd put in a she
 ---
 
 ### Interactive session (`--keep-session-open`)
-The agent answers, then waits for your next message.  History is preserved across turns.
+The agent answers, then waits for your next message.  Between tasks, history
+is automatically cleaned up according to `session_reset_mode` (default:
+`summary` — keeps a one-line recap of the last answer, drops everything else).
 
 ```bash
 python agent.py --agent console --prompt "Start here" --keep-session-open
 ```
 
-The agent remembers everything it read and did in prior turns.  Effective for:
+The agent remembers a brief summary of what it did in prior turns, but the
+full step-by-step history is dropped to prevent input token snowballing.
+Configure in the agent YAML:
+
+```yaml
+session_reset_mode: summary   # default — brief recap between tasks
+# session_reset_mode: reset   # nuke all history, zero continuity
+# session_reset_mode: keep    # old behaviour — full history preserved (expensive)
+```
+
+Effective for:
 - Iterative debugging ("that's not quite right, now also handle the edge case where…")
 - Exploration sessions where the next step depends on what was just found
 - Pair-programming style work
@@ -95,7 +109,7 @@ echo "run the test suite and fix any failures"   > /tmp/skynet2_code.fifo
 echo "update CHANGELOG.md for today's commits"   > /tmp/skynet2_code.fifo
 ```
 
-Messages are **queued** — if the agent is busy with task 1, task 2 waits.  The agent session is **persistent** across tasks (full history preserved), so each task can build on what came before.
+Messages are **queued** — if the agent is busy with task 1, task 2 waits.  Between tasks, history is automatically cleaned up according to `session_reset_mode` (default: `summary` — keeps a brief recap, drops the rest).  Set `session_reset_mode: keep` in the agent YAML if you want full history continuity across tasks.
 
 Integrates with anything that can write to a file path:
 - cron
@@ -283,39 +297,70 @@ Room grows each round because every agent reads the full history.  Most expensiv
 ### Scenario 6 — Overnight daemon (10 cron tasks)
 
 **Setup:** `agent_daemon.py` with `code` agent, 10 tasks delivered overnight via cron  
-**Each task:** average 30 K tokens (moderate changes)
+**Each task:** average 30 K tokens (moderate changes)  
+**Session reset mode:** `summary` (default)
 
 | | Tokens |
 |---|---|
 | Session warm-up (initial prompt) | 5 K |
 | 10 tasks × 30 K each | 300 K |
-| History carries forward (+15% per task) | +45 K |
-| **Total overnight** | **~350 K** |
+| Inter-task overhead (recap message only) | ~0.5 K |
+| **Total overnight** | **~305 K** |
 
-**Rough cost:** ~$1.50–$2.50 on gpt-5.3-codex
+With `session_reset_mode: summary` (default), each task starts nearly clean —
+just a ~100-char recap of the last answer.  This prevents the old snowball
+problem where later tasks paid for the full history of all prior tasks.
 
-Because the session is persistent, later tasks benefit from context accumulated by earlier ones (the agent already knows the codebase structure, conventions, etc.).
+**Old behaviour** (`session_reset_mode: keep`):
+History carries forward (+15% per task), total would be ~350 K.
+
+**Rough cost:** ~$1.20–$2.00 on gpt-5.3-codex
 
 ---
 
 ### Scenario 7 — Interactive refactoring session
 
-**Mode:** `--keep-session-open`, 8 follow-up messages  
+**Mode:** `--keep-session-open`, `session_reset_mode: summary`, 8 follow-up messages  
 **Agent:** `pcode`
 
-| Turn | New tokens in history | LLM call input |
-|---|---|---|
-| Turn 1 (initial) | 0 | 20 K |
-| Turn 2 | +4 K | 24 K |
-| Turn 3 | +3 K | 27 K |
-| Turn 4–8 (with compact_history at turn 5) | +15 K then reset to 12 K | 12–28 K |
-| **Total across 8 turns** | | **~180 K input, ~15 K output** |
+Each follow-up task starts nearly clean (recap of the last answer only).
+Within a single task, observation compression and action compaction keep
+the context tight:
 
-`compact_history` at turn 5 resets the context window from ~35 K down to ~12 K (keeps last 4 messages + summary), saving ~60 K tokens on the remaining turns.
+| Turn | What happens | LLM call input |
+|---|---|---|
+| Turn 1 (task 1) | Initial prompt + reads | 20 K |
+| Turn 1, step 3 | Write (action compacted, obs summarised) | 22 K |
+| Turn 1, step 5 | Final answer → session reset | — |
+| Turn 2 (task 2) | Recap (100 chars) + new prompt | 5 K |
+| Turn 2, step 3 | Reads + edits | 12 K |
+| Turn 2, step 4 | Final answer → session reset | — |
+| … | … | … |
+| **Total across 8 tasks** | | **~120 K input, ~12 K output** |
+
+**Old behaviour** (`session_reset_mode: keep`, no action compaction):
+Would accumulate ~35 K by turn 4, require `compact_history` at turn 5,
+and total ~180 K input + ~15 K output across 8 turns — **50% more expensive**.
 
 ---
 
 ## Cost control strategies
+
+> For the full technical breakdown of how context windows are built and
+> trimmed, see **[token_usage.md](token_usage.md)**.
+
+### Automatic (no config needed)
+These optimisations are always active:
+
+| Optimisation | Savings |
+|---|---|
+| **Write-command observation → 1-line summary** | ~2–50k per write step |
+| **Assistant action payload compaction** | ~2–50k per write step |
+| **Head+tail observation compression** (reads > 8k) | ~50% of large observations |
+| **Environment block sent once** (first call only) | System prompt size on steps 2+ |
+| **Startup observe output capped to 8k** | Prevents 300k in system prompt |
+| **History pressure hints** | Triggers `compact_history` when needed |
+| **Session reset between tasks** (`summary` mode default) | ~95% of prior task history |
 
 ### 1. Right-size the agent
 | Task | Recommended agent | Why |
@@ -566,11 +611,15 @@ python swarm.py --summary --room-file rooms/my-meeting.jsonl
 | `MAX_STEPS` | 30 | `limits.max_steps` in agent yaml |
 | `MAX_CONTEXT_MESSAGES` | 20 | hardcoded (edit `agent_constants.py`) |
 | `MAX_OBS_HISTORY_CHARS` | 8 000 | `limits.max_obs_history_chars` in agent yaml |
+| `OBSERVATION_FILE_PREVIEW_CHARS` | 1 200 | `limits.observable_file_preview_chars` |
+| `OBSERVATION_GENERIC_PREVIEW_CHARS` | 4 000 | `limits.observable_generic_preview_chars` |
+| `OBSERVATION_COMPACT_PREVIEW_CHARS` | 2 000 | `limits.observable_compact_preview_chars` |
 | `MAX_OUTPUT_CHARS` | 300 000 | hardcoded |
 | `MAX_AGENT_DEPTH` | 3 | `limits.max_depth` in agent yaml |
 | `MAX_CHILD_AGENTS` | 5 | `limits.max_children` in agent yaml |
 | `CHILD_AGENT_TIMEOUT` | 600 s | hardcoded |
 | `MAX_RETRIES_PER_STEP` | 3 | hardcoded |
+| `session_reset_mode` | `summary` | `session_reset_mode` in agent yaml |
 
 ---
 

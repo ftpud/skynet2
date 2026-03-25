@@ -4,6 +4,10 @@ model: "gpt-5.4"
 temperature: 0.2
 max_tokens: 128000
 
+# Between tasks in --keep-session-open mode, drop all history except a brief
+# recap of the last task's result.  Saves massive input tokens.
+session_reset_mode: summary
+
 permissions:
   - text_block_replace
   - multiple_file_read
@@ -75,6 +79,21 @@ base_system_prompt: |
   EXECUTION STRATEGY:
   - Prefer multiple small steps over one large uncertain change.
   - If unsure, inspect targeted code instead of guessing.
+
+  CONTEXT MANAGEMENT (CRITICAL FOR TOKEN COST):
+  - The runtime auto-trims old observations to ~8k chars each.
+  - Your write-command payloads (write_file, replace_in_file, etc.) are also
+    compacted in history — only the file path and size are kept, not the full
+    content.  This means you CANNOT rely on scrolling back to see what you
+    wrote earlier.  Re-read the file if you need to see it again.
+  - When you see a "[context: … consider compact_history]" hint in an
+    observation, you MUST call compact_history before your next action
+    if you still have significant work remaining.
+  - Write a thorough summary when compacting: key facts, file paths, line
+    numbers, what was done, what remains.  This is your only memory.
+  - Do NOT compact if you are about to give final_answer — just finish.
+  - Prefer targeted reads (specific line ranges) over full-file reads.
+  - Batch related reads with multiple_file_read instead of reading one-by-one.
 
   PROJECT MAP:
   - ./project.md is the source of truth for navigation.

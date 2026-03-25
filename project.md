@@ -12,6 +12,7 @@
 ## Top-Level Files
 - `README.md` — quick-start, CLI reference, agent/command inventory
 - `PROJECT_OVERVIEW.md` — capabilities, scenarios, token economics, use cases
+- `token_usage.md` — deep dive on context window formation, truncation pipeline, walked examples
 - `swarm.md` — swarm meeting system deep-dive
 - `ARCHITECTURE.md` — runtime internals and design decisions
 - `project.md` — this file (navigation map for agents)

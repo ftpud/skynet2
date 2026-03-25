@@ -542,6 +542,54 @@ class Agent:
                 f"~{old_chars} chars freed"
             )
 
+    # Commands whose large string params are payload the model never needs
+    # to re-see in history (it can re-read the file instead).  Only the
+    # target path / identifier matters.
+    _WRITE_HEAVY_COMMANDS = frozenset({
+        "write_file", "append_to_file", "replace_in_file",
+        "replace_in_multiple_files", "text_block_replace", "apply_patch",
+    })
+    # Params that are always small identifiers — never truncate these.
+    _KEEP_FULL_PARAMS = frozenset({"path", "paths", "file", "filename", "command", "agent", "session_id"})
+
+    def _compact_action_for_history(self, parsed_item: dict) -> str:
+        """Return a JSON string for the assistant action, capped for history.
+
+        The model doesn't need its own write payloads in history — the
+        observation already records success/failure and the file can be
+        re-read.  So we aggressively strip large content params from
+        write-heavy commands, and lightly trim everything else.
+        """
+        raw = json.dumps(parsed_item, ensure_ascii=False)
+        if len(raw) <= 400:
+            return raw
+
+        compact = dict(parsed_item)
+        params = compact.get("parameters")
+        cmd_name = compact.get("name", "")
+
+        if not isinstance(params, dict):
+            return raw
+
+        is_write_heavy = cmd_name in self._WRITE_HEAVY_COMMANDS
+        trimmed_params = {}
+        for k, v in params.items():
+            v_str = json.dumps(v, ensure_ascii=False) if not isinstance(v, str) else v
+            v_len = len(v_str)
+
+            # Small identifiers — always keep in full
+            if k in self._KEEP_FULL_PARAMS or v_len <= 80:
+                trimmed_params[k] = v
+            elif is_write_heavy:
+                # Aggressively strip: just note the size
+                trimmed_params[k] = f"[{v_len} chars]"
+            else:
+                # Non-write commands: keep first 120 chars for context
+                trimmed_params[k] = v_str[:120] + f"…[{v_len} chars]"
+
+        compact["parameters"] = trimmed_params
+        return json.dumps(compact, ensure_ascii=False)
+
     def _compact_history(self, params: dict, step: int) -> str:
         """Replace old history messages with a compact summary provided by the model."""
         summary = params.get("summary")
@@ -772,7 +820,10 @@ class Agent:
                 {"command": f"cd {shlex.quote(self.work_dir)} && {c}"},
                 step=0
             )
-            obs = obs[: self.max_output_chars]
+            # Cap to obs history limit, not max_output_chars — this goes into
+            # the system prompt and is re-sent on EVERY API call.
+            if len(obs) > self.max_obs_history_chars:
+                obs = obs[: self.max_obs_history_chars] + f"\n[…trimmed — {len(obs)} chars total]"
             results.append(f"$ {c}\n{obs}")
         return "\n\n".join(results)
 
@@ -946,15 +997,25 @@ class Agent:
 
                     obs = obs[: self.max_output_chars] + "…" if len(obs) > self.max_output_chars else obs
 
-                    # Full obs is shown for the current step; trim what's stored
-                    # in history so old observations don't keep inflating the
-                    # context window on every future API call.
-                    if len(obs) > self.max_obs_history_chars:
-                        history_obs = obs[: self.max_obs_history_chars] + f"\n[…trimmed — {len(obs)} chars total; use read_file/linux_command to retrieve again if needed]"
+                    # Build a compact version for history storage.
+                    # Write commands: the model doesn't need the echo — just
+                    # a confirmation with size.
+                    # Read/other commands: smart head+tail compression so the
+                    # model keeps both the beginning AND end of the output
+                    # (the blunt [:8000] cut used to lose the tail entirely).
+                    if name in self._WRITE_HEAVY_COMMANDS:
+                        history_obs = self._summarize_command_result(name, obs)
+                    elif len(obs) > self.max_obs_history_chars:
+                        history_obs = compress_observation(
+                            obs,
+                            file_preview_chars=self.observable_file_preview_chars,
+                            generic_preview_chars=min(self.max_obs_history_chars, self.observable_generic_preview_chars),
+                            compact_preview_chars=min(self.max_obs_history_chars, self.observable_compact_preview_chars),
+                        )
                     else:
                         history_obs = obs
 
-                    self.history.append({"role": "assistant", "content": json.dumps(parsed_item)})
+                    self.history.append({"role": "assistant", "content": self._compact_action_for_history(parsed_item)})
 
                     # Add a history-pressure hint so the model knows when to compact
                     history_chars = sum(len(m.get("content", "")) for m in self.history)
