@@ -104,8 +104,25 @@ def extract_all_json_actions(text: str) -> list[dict]:
     if not text:
         return []
 
+    def _normalize_action_obj(obj):
+        if not isinstance(obj, dict):
+            return None
+
+        action = obj.get("action")
+        if action in ("command", "final_answer"):
+            return obj
+
+        # Fallback schema: {"action": "<command_name>", "parameters": {...}}
+        if isinstance(action, str) and action:
+            normalized = {"action": "command", "name": action}
+            if "parameters" in obj:
+                normalized["parameters"] = obj.get("parameters")
+            return normalized
+
+        return None
+
     def _is_action(obj) -> bool:
-        return isinstance(obj, dict) and obj.get("action") in ("command", "final_answer")
+        return _normalize_action_obj(obj) is not None
 
     def _dedupe(items: list[dict]) -> list[dict]:
         seen = set()
@@ -130,9 +147,9 @@ def extract_all_json_actions(text: str) -> list[dict]:
         try:
             parsed = json.loads(src)
             if _is_action(parsed):
-                return [parsed]
+                return [_normalize_action_obj(parsed)]
             if isinstance(parsed, list):
-                list_actions = [item for item in parsed if _is_action(item)]
+                list_actions = [_normalize_action_obj(item) for item in parsed if _is_action(item)]
                 if list_actions:
                     return _dedupe(list_actions)
         except json.JSONDecodeError:
@@ -146,9 +163,9 @@ def extract_all_json_actions(text: str) -> list[dict]:
                 continue
 
             if _is_action(obj):
-                actions.append(obj)
+                actions.append(_normalize_action_obj(obj))
             elif isinstance(obj, list):
-                actions.extend(item for item in obj if _is_action(item))
+                actions.extend(_normalize_action_obj(item) for item in obj if _is_action(item))
 
     if actions:
         return _dedupe(actions)
@@ -156,45 +173,44 @@ def extract_all_json_actions(text: str) -> list[dict]:
     depth = 0
     in_string = False
     escape = False
-    block_start: int | None = None
+    block_start = None
 
     for i, ch in enumerate(text):
-        if escape:
-            escape = False
-            continue
-        if ch == "\\" and in_string:
-            escape = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-            continue
         if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
             continue
+
+        if ch == '"':
+            in_string = True
+            continue
+
         if ch in "[{":
             if depth == 0:
                 block_start = i
             depth += 1
-        elif ch in "]}":
+            continue
+
+        if ch in "]}":
             if depth == 0:
                 continue
             depth -= 1
             if depth == 0 and block_start is not None:
-                block = text[block_start:i + 1]
-                try_blocks = [block]
-                repaired_block = re.sub(r",\s*([}\]])", r"\1", block)
-                if repaired_block != block:
-                    try_blocks.append(repaired_block)
-                for candidate in try_blocks:
+                candidate = text[block_start : i + 1]
+                for candidate_src in (candidate, re.sub(r",\s*([}\]])", r"\1", candidate)):
                     try:
-                        obj = json.loads(candidate)
+                        obj = json.loads(candidate_src)
                     except json.JSONDecodeError:
                         continue
+
                     if _is_action(obj):
-                        actions.append(obj)
-                        break
-                    if isinstance(obj, list):
-                        actions.extend(item for item in obj if _is_action(item))
-                        break
+                        actions.append(_normalize_action_obj(obj))
+                    elif isinstance(obj, list):
+                        actions.extend(_normalize_action_obj(item) for item in obj if _is_action(item))
                 block_start = None
 
     return _dedupe(actions)

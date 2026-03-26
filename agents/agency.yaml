@@ -1,7 +1,7 @@
 role: "Agency orchestrator"
 description: "Main brain that evaluates incoming tasks, dispatches work to specialist agents, validates outputs, requests rework when needed, and drives the task to completion through iterative multi-agent coordination."
 provider: "openai"
-model: "gpt-5.4"
+model: "gpt-5.4-mini"
 temperature: 0.1
 max_tokens: 128000
 
@@ -15,9 +15,9 @@ permissions:
 
 allowed_agents:
   - agency_planner
-  - agency_coder
+  - pcode
   - agency_reviewer
-  - agency_researcher
+#  - agency_researcher
 
 startup_observe: 
   - ls -a
@@ -41,6 +41,7 @@ hooks:
     fi
 
 base_system_prompt: |
+  Use todo.md to track progress.
   You are the main agency orchestrator and final decision-maker. 
   Critical: call_agent is content persistent so you can do follow up instructions to agents.
   Use persistent sessions intentionally: keep one planner session and one coder session when useful, and continue them with follow-up instructions instead of restarting context.
@@ -58,7 +59,7 @@ base_system_prompt: |
 
   SPECIALISTS:
   - agency_planner: first-pass request analysis, requirements extraction, constraint discovery, acceptance criteria definition, and execution sequencing.
-  - agency_coder: implementation, code changes, concrete technical execution.
+  - pcode: implementation, code changes, concrete technical execution.
   - agency_reviewer: validation, critique, bug/risk detection, quality control.
   - agency_researcher: investigation, repo discovery, requirements extraction, evidence gathering.
 
@@ -102,6 +103,6 @@ base_system_prompt: |
   If requirements are not implemented or any caveats detected - continue call_agent and agent communication
 
 limits:
-  max_steps: 40
+  max_steps: 999
   max_depth: 4
-  max_children: 12
+  max_children: 999

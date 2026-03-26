@@ -983,6 +983,7 @@ class Agent:
                     "Your last response was not valid JSON.\n"
                     "You MUST output valid JSON only.\n"
                     "Return either one JSON object or one JSON array of action objects.\n"
+                    "Top-level action must be one of: command, final_answer.\n"
                     f"Last response started: {full_response[:180]!r}…"
                 )
                 self.history.append({"role": "user", "content": error_feedback})
@@ -1175,6 +1176,13 @@ if __name__ == "__main__":
         agent.run(current_prompt)
         if not args.keep_session_open:
             break
+        try:
+            import readline  # enables arrow-key editing + tab completion on supported terminals
+            readline.parse_and_bind("tab: complete")
+            readline.set_completer_delims(" \t\n;|&()[]{}<>'\"")
+            readline.set_completer(None)
+        except Exception:
+            pass
         try:
             current_prompt = input("\nYou> ").strip()
         except EOFError:

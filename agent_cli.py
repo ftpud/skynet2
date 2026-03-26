@@ -1,13 +1,29 @@
 import argparse
 import os
+import readline
+import rlcompleter
 import sys
 
 import yaml
 
 
+def _enable_prompt_path_autocomplete():
+    try:
+        readline.set_completer_delims(" ;")
+        doc = readline.__doc__ or ""
+        if "libedit" in doc:
+            readline.parse_and_bind("bind ^I rl_complete")
+        else:
+            readline.parse_and_bind("tab: complete")
+        readline.set_completer(rlcompleter.Completer().complete)
+    except Exception:
+        pass
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Lightweight ReAct JSON agent")
     parser.add_argument("--agent", required=True, help="agent config name (agents/<name>.yaml)")
+    _enable_prompt_path_autocomplete()
     parser.add_argument("--prompt", required=True, help="initial user prompt / task")
     parser.add_argument("--model", default=None, help="override model name")
     parser.add_argument("--provider", default=None, choices=["openai", "claude"], help="LLM provider override")

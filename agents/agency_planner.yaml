@@ -11,6 +11,7 @@ permissions:
   - ls
   - linux_command
   - multiple_linux_commands
+  - write_file
 
 startup_observe: 
   - ls -a
